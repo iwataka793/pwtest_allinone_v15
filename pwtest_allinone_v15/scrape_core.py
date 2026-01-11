@@ -666,6 +666,7 @@ def _calendar_sanity(stats: dict):
     if not isinstance(stats, dict) or not stats.get("ok"):
         return False, "stats_ng"
     total_slots = int(stats.get("total_slots", 0) or 0)
+    filled_slots = int(stats.get("filled_slots", 0) or 0)
     time_rows = int(stats.get("time_rows", 0) or 0)
     max_cols = int(stats.get("max_cols", 0) or 0)
     td_count = int(stats.get("td_count", 0) or 0)
@@ -674,7 +675,8 @@ def _calendar_sanity(stats: dict):
     if max_cols < _CAL_MIN_COLS or max_cols > _CAL_MAX_COLS:
         return False, "max_cols_range"
     expected_total = time_rows * max_cols
-    if expected_total <= 0 or total_slots != expected_total:
+    slots_for_match = filled_slots if filled_slots else total_slots
+    if expected_total <= 0 or slots_for_match != expected_total:
         return False, "total_slots_mismatch"
     if td_count <= 0:
         return False, "td_count_missing"
@@ -1344,20 +1346,74 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
   const grid = Array.from({ length: rowCount }, () => Array(maxCols).fill(null));
   const out = { ok:true, bell:0, maru:0, tel:0, dash:0, other:0, total_slots:0, bookable_slots:0, time_rows: rowCount, max_cols: maxCols, td_count:0 };
 
-  function classifyCell(td) {
+  function parseTime(txt) {
+    if (!txt) return null;
+    const m = String(txt).match(/(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    const hh = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    return hh * 60 + mm;
+  }
+
+  const rowTimes = dataRows.map(r => {
+    const first = r.querySelector("td,th");
+    return parseTime(first ? first.innerText : "");
+  });
+  const rowMinutes = Array(rowCount).fill(null);
+  const diffs = [];
+  for (let i = 0; i < rowCount - 1; i++) {
+    if (rowTimes[i] != null && rowTimes[i + 1] != null) {
+      const diff = rowTimes[i + 1] - rowTimes[i];
+      if (diff > 0 && diff <= 360) {
+        rowMinutes[i] = diff;
+        diffs.push(diff);
+      }
+    }
+  }
+  const sortedDiffs = diffs.slice().sort((a, b) => a - b);
+  const median = sortedDiffs.length
+    ? sortedDiffs[Math.floor(sortedDiffs.length / 2)]
+    : 30;
+  for (let i = 0; i < rowCount; i++) {
+    if (!rowMinutes[i]) rowMinutes[i] = median;
+  }
+  const minRowMinutes = rowMinutes.length ? Math.min(...rowMinutes) : null;
+  const maxRowMinutes = rowMinutes.length ? Math.max(...rowMinutes) : null;
+  const expectedMinutes = rowMinutes.reduce((sum, v) => sum + (v || 0), 0) * maxCols;
+
+  out.row_count = rowCount;
+  out.day_cols = maxCols;
+  out.row_minutes_stats = { min: minRowMinutes, median: median, max: maxRowMinutes };
+  out.base_block_minutes = median;
+  out.expected_minutes = expectedMinutes;
+  out.excluded_tel_big_minutes = 0;
+  out.maru_minutes = 0;
+  out.bell_minutes = 0;
+  out.tel_minutes = 0;
+
+  let filledSlots = 0;
+  let filledMinutes = 0;
+
+  function classifyCell(td, rs) {
     if (!td) return "other";
     const dn = (td.getAttribute("data-name") || "").trim().toUpperCase();
     const dataMark = (td.getAttribute("data-mark") || "").trim().toUpperCase();
     const dataStatus = (td.getAttribute("data-status") || "").trim().toUpperCase();
     const txt = (td.innerText || "").trim();
     const txtUpper = txt.toUpperCase();
+    const txtFlat = txt.replace(/\s+/g, "");
     const aria = (td.getAttribute("aria-label") || "").trim().toUpperCase();
     const title = (td.getAttribute("title") || "").trim().toUpperCase();
     const cls = (td.className || "").toString().toUpperCase();
+    const dnMsg = (td.getAttribute("data-name_message") || "").trim();
+    const telBigText = "お電話にてお問い合わせください";
+    const telHint = /TEL|電話|お問い合わせ/.test(txtFlat) || /TEL|電話|お問い合わせ/.test(dnMsg);
+    if (dnMsg.includes(telBigText) || txtFlat.includes(telBigText) || (rs >= 10 && telHint)) return "excluded_tel_big";
     if (dn === "TEL" || dataStatus.includes("TEL") || txtUpper === "TEL" || aria.includes("TEL") || title.includes("TEL") || cls.includes("TEL") || cls.includes("PHONE")) return "tel";
     // × は bell 扱い
     if (txt === "×" || txt === "✕" || txt === "✖" || txt.includes("不可") || aria.includes("×") || title.includes("×") || cls.includes("NG")) return "bell";
-    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
+    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇"))) || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
     if (cls.includes("BELL") || cls.includes("CROSS") || dataStatus.includes("NG")) return "bell";
     const bg = (getComputedStyle(td).backgroundImage || "").toLowerCase();
     if (bg.includes("bell") || bg.includes("cross") || bg.includes("ng")) return "bell";
@@ -1381,8 +1437,19 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
   function countSlot(r, c, t) {
     if (grid[r][c]) return;
     grid[r][c] = t;
+    const minutes = rowMinutes[r] || 0;
+    filledSlots += 1;
+    filledMinutes += minutes;
+    if (t === "excluded_tel_big") {
+      out.excluded_tel_big = (out.excluded_tel_big || 0) + 1;
+      out.excluded_tel_big_minutes += minutes;
+      return;
+    }
     out[t] = (out[t] || 0) + 1;
     out.total_slots += 1;
+    if (t === "bell") out.bell_minutes += minutes;
+    if (t === "maru") out.maru_minutes += minutes;
+    if (t === "tel") out.tel_minutes += minutes;
     if (t === "bell" || t === "maru" || t === "tel") out.bookable_slots += 1;
   }
 
@@ -1395,7 +1462,7 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
       if (col >= maxCols) break;
       const rs = parseInt(td.getAttribute("rowspan") || "1", 10) || 1;
       const cs = parseInt(td.getAttribute("colspan") || "1", 10) || 1;
-      const t = classifyCell(td);
+      const t = classifyCell(td, rs);
       const rLimit = Math.min(rowCount, r + rs);
       const cLimit = Math.min(maxCols, col + cs);
       for (let rr = r; rr < rLimit; rr++) {
@@ -1407,6 +1474,10 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
     }
   }
 
+  out.filled_slots = filledSlots;
+  out.filled_minutes = filledMinutes;
+  out.effective_minutes = expectedMinutes - (out.excluded_tel_big_minutes || 0);
+  out.grid_mismatch = ((rowCount * maxCols) !== filledSlots) || (Math.abs(filledMinutes - expectedMinutes) > 0.1);
   out.bell_rate_total = out.total_slots ? (out.bell / out.total_slots) : null;
   out.bell_rate_bookable = out.bookable_slots ? (out.bell / out.bookable_slots) : null;
   return out;
@@ -3473,7 +3544,56 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
   const grid = Array.from({ length: rowCount }, () => Array(maxCols).fill(null));
   const out = { ok:true, bell:0, maru:0, tel:0, dash:0, other:0, total_slots:0, bookable_slots:0, time_rows:rowCount, max_cols:maxCols, td_count:0, symbols:{} };
 
-  function cellType(td){
+  function parseTime(txt) {
+    if (!txt) return null;
+    const m = String(txt).match(/(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    const hh = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    return hh * 60 + mm;
+  }
+
+  const rowTimes = dataRows.map(r => {
+    const first = r.querySelector("td,th");
+    return parseTime(first ? first.innerText : "");
+  });
+  const rowMinutes = Array(rowCount).fill(null);
+  const diffs = [];
+  for (let i = 0; i < rowCount - 1; i++) {
+    if (rowTimes[i] != null && rowTimes[i + 1] != null) {
+      const diff = rowTimes[i + 1] - rowTimes[i];
+      if (diff > 0 && diff <= 360) {
+        rowMinutes[i] = diff;
+        diffs.push(diff);
+      }
+    }
+  }
+  const sortedDiffs = diffs.slice().sort((a, b) => a - b);
+  const median = sortedDiffs.length
+    ? sortedDiffs[Math.floor(sortedDiffs.length / 2)]
+    : 30;
+  for (let i = 0; i < rowCount; i++) {
+    if (!rowMinutes[i]) rowMinutes[i] = median;
+  }
+  const minRowMinutes = rowMinutes.length ? Math.min(...rowMinutes) : null;
+  const maxRowMinutes = rowMinutes.length ? Math.max(...rowMinutes) : null;
+  const expectedMinutes = rowMinutes.reduce((sum, v) => sum + (v || 0), 0) * maxCols;
+
+  out.row_count = rowCount;
+  out.day_cols = maxCols;
+  out.row_minutes_stats = { min: minRowMinutes, median: median, max: maxRowMinutes };
+  out.base_block_minutes = median;
+  out.expected_minutes = expectedMinutes;
+  out.excluded_tel_big_minutes = 0;
+  out.maru_minutes = 0;
+  out.bell_minutes = 0;
+  out.tel_minutes = 0;
+
+  let filledSlots = 0;
+  let filledMinutes = 0;
+
+  function cellType(td, rs){
     const txt = (td.innerText || "").trim();
     const dn = (td.getAttribute("data-name") || "").trim().toUpperCase();
     const dataMark = (td.getAttribute("data-mark") || "").trim().toUpperCase();
@@ -3481,9 +3601,14 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
     const aria = (td.getAttribute("aria-label") || "").trim().toUpperCase();
     const title = (td.getAttribute("title") || "").trim().toUpperCase();
     const cls = (td.className || "").toString().toUpperCase();
+    const txtFlat = txt.replace(/\s+/g, "");
+    const dnMsg = (td.getAttribute("data-name_message") || "").trim();
+    const telBigText = "お電話にてお問い合わせください";
+    const telHint = /TEL|電話|お問い合わせ/.test(txtFlat) || /TEL|電話|お問い合わせ/.test(dnMsg);
+    if (dnMsg.includes(telBigText) || txtFlat.includes(telBigText) || (rs >= 10 && telHint)) return "excluded_tel_big";
     if (dn === "TEL" || dataStatus.includes("TEL") || txt.toUpperCase() === "TEL" || aria.includes("TEL") || title.includes("TEL") || cls.includes("TEL") || cls.includes("PHONE")) return "tel";
     if (txt === "×" || txt === "✕" || txt === "✖" || txt.includes("不可") || aria.includes("×") || title.includes("×") || cls.includes("NG")) return "bell";
-    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
+    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇"))) || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
     if (cls.includes("BELL") || cls.includes("CROSS") || dataStatus.includes("NG")) return "bell";
     const bg = (getComputedStyle(td).backgroundImage || "").toLowerCase();
     if (bg.includes("bell") || bg.includes("cross") || bg.includes("ng")) return "bell";
@@ -3506,8 +3631,19 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
   function countSlot(r, c, t) {
     if (grid[r][c]) return;
     grid[r][c] = t;
+    const minutes = rowMinutes[r] || 0;
+    filledSlots += 1;
+    filledMinutes += minutes;
+    if (t === "excluded_tel_big") {
+      out.excluded_tel_big = (out.excluded_tel_big || 0) + 1;
+      out.excluded_tel_big_minutes += minutes;
+      return;
+    }
     out[t] = (out[t] || 0) + 1;
     out.total_slots += 1;
+    if (t === "bell") out.bell_minutes += minutes;
+    if (t === "maru") out.maru_minutes += minutes;
+    if (t === "tel") out.tel_minutes += minutes;
     if (t === "bell" || t === "maru" || t === "tel") out.bookable_slots += 1;
   }
 
@@ -3519,9 +3655,9 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
       while (col < maxCols && grid[r][col]) col++;
       if (col >= maxCols) break;
 
-      const t = cellType(td);
       const rs = parseInt(td.getAttribute("rowspan") || "1", 10) || 1;
       const cs = parseInt(td.getAttribute("colspan") || "1", 10) || 1;
+      const t = cellType(td, rs);
       const rLimit = Math.min(rowCount, r + rs);
       const cLimit = Math.min(maxCols, col + cs);
       for (let rr = r; rr < rLimit; rr++) {
@@ -3537,6 +3673,11 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
       col += cs;
     }
   }
+
+  out.filled_slots = filledSlots;
+  out.filled_minutes = filledMinutes;
+  out.effective_minutes = expectedMinutes - (out.excluded_tel_big_minutes || 0);
+  out.grid_mismatch = ((rowCount * maxCols) !== filledSlots) || (Math.abs(filledMinutes - expectedMinutes) > 0.1);
 
   const denom = out.total_slots || 0;
   out.other_ratio = denom > 0 ? (out.other / denom) : null;
