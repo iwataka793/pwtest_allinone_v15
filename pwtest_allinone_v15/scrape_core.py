@@ -237,6 +237,19 @@ def _looks_like_all_dash(stats: dict) -> bool:
         return False
     return (dash / total) >= _ALL_DASH_RATIO
 
+def _looks_like_call_only_tel_big(stats: dict) -> bool:
+    if not isinstance(stats, dict):
+        return False
+    excluded_tel_big_minutes = float(stats.get("excluded_tel_big_minutes") or 0)
+    if excluded_tel_big_minutes <= 0:
+        return False
+    bell = int(stats.get("bell") or 0)
+    maru = int(stats.get("maru") or 0)
+    tel = int(stats.get("tel") or 0)
+    dash = int(stats.get("dash") or 0)
+    total = int(stats.get("total_slots") or 0)
+    return bell == 0 and maru == 0 and tel == 0 and dash == total
+
 def _validate_stats(stats: dict, preset: str = None, gid: str = None):
     if not isinstance(stats, dict):
         return
@@ -1726,7 +1739,7 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
         last_invalid_stats["reason"] = last_invalid_reason or "sanity_fail"
         return last_invalid_stats, (last_frame_url or None)
 
-    return {"ok": False, "reason": "calendar iframe not detected (timeout)", "frame_names": frame_names, "frame_urls": frame_urls}, None
+    return {"ok": False, "reason": "calendar iframe not detected(timeout)", "frame_names": frame_names, "frame_urls": frame_urls}, None
 
 def count_calendar_stats_by_slots(page, stop_evt: threading.Event, progress_cb=None, preset: str = None, gid: str = None):
     short_ms = min(CAL_WAIT_MS, CAL_WAIT_SHORT_MS)
@@ -3841,6 +3854,16 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
                             await page.wait_for_timeout(slow_step_ms)
                             waited += slow_step_ms
                             continue
+                        if _looks_like_call_only_tel_big(stats):
+                            stats["ok"] = True
+                            stats["reason"] = "call_only_tel_big"
+                            if isinstance(stats, dict):
+                                stats["_detail"] = {
+                                    "sanity_retries": sanity_retry_count,
+                                    "sanity_last_reason": sanity_last_reason,
+                                }
+                            _validate_stats(stats, preset=preset, gid=gid)
+                            return stats, last_frame_url
                         if _looks_like_all_dash(stats):
                             last_invalid_stats = dict(stats)
                             last_invalid_stats["ok"] = False
