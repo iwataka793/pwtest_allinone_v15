@@ -848,11 +848,28 @@ class App(tk.Tk):
                 self.var_status.set("完了しました")
 
             if status in ("done", "stopped", "blocked", "error"):
-                self._run_active = False
-                self._poll_after_id = None
+                self._finish_run(status)
                 return
 
         self._poll_after_id = self.after(1000, self._poll_progress)
+
+    def _finish_run(self, status: str):
+        self._run_active = False
+        self._poll_after_id = None
+        self._play_finish_sound(status)
+
+    def _play_finish_sound(self, status: str):
+        if not self.var_beep.get():
+            return
+        ok = status == "done"
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK if ok else winsound.MB_ICONHAND)
+        except Exception:
+            try:
+                self.bell()
+            except Exception:
+                pass
 
     def toggle_log_visibility(self):
         self.var_showlog.set(not self.var_showlog.get())
