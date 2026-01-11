@@ -1391,6 +1391,10 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
   out.maru_minutes = 0;
   out.bell_minutes = 0;
   out.tel_minutes = 0;
+  out.tel_1block_minutes = 0;
+  out.tel_long_minutes = 0;
+  out.tel_1block_slots = 0;
+  out.tel_long_slots = 0;
 
   let filledSlots = 0;
   let filledMinutes = 0;
@@ -1413,7 +1417,7 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
     if (dn === "TEL" || dataStatus.includes("TEL") || txtUpper === "TEL" || aria.includes("TEL") || title.includes("TEL") || cls.includes("TEL") || cls.includes("PHONE")) return "tel";
     // × は bell 扱い
     if (txt === "×" || txt === "✕" || txt === "✖" || txt.includes("不可") || aria.includes("×") || title.includes("×") || cls.includes("NG")) return "bell";
-    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇"))) || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
+    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || txtFlat.includes("○先行") || txtFlat.includes("〇先行") || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇"))) || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
     if (cls.includes("BELL") || cls.includes("CROSS") || dataStatus.includes("NG")) return "bell";
     const bg = (getComputedStyle(td).backgroundImage || "").toLowerCase();
     if (bg.includes("bell") || bg.includes("cross") || bg.includes("ng")) return "bell";
@@ -1434,7 +1438,7 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
     return "other";
   }
 
-  function countSlot(r, c, t) {
+  function countSlot(r, c, t, telKind) {
     if (grid[r][c]) return;
     grid[r][c] = t;
     const minutes = rowMinutes[r] || 0;
@@ -1449,7 +1453,16 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
     out.total_slots += 1;
     if (t === "bell") out.bell_minutes += minutes;
     if (t === "maru") out.maru_minutes += minutes;
-    if (t === "tel") out.tel_minutes += minutes;
+    if (t === "tel") {
+      out.tel_minutes += minutes;
+      if (telKind === "long") {
+        out.tel_long_minutes += minutes;
+        out.tel_long_slots += 1;
+      } else if (telKind === "1block") {
+        out.tel_1block_minutes += minutes;
+        out.tel_1block_slots += 1;
+      }
+    }
     if (t === "bell" || t === "maru" || t === "tel") out.bookable_slots += 1;
   }
 
@@ -1463,11 +1476,12 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
       const rs = parseInt(td.getAttribute("rowspan") || "1", 10) || 1;
       const cs = parseInt(td.getAttribute("colspan") || "1", 10) || 1;
       const t = classifyCell(td, rs);
+      const telKind = (t === "tel" && rs > 1) ? "long" : ((t === "tel") ? "1block" : null);
       const rLimit = Math.min(rowCount, r + rs);
       const cLimit = Math.min(maxCols, col + cs);
       for (let rr = r; rr < rLimit; rr++) {
         for (let cc = col; cc < cLimit; cc++) {
-          countSlot(rr, cc, t);
+          countSlot(rr, cc, t, telKind);
         }
       }
       col += cs;
@@ -3589,6 +3603,10 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
   out.maru_minutes = 0;
   out.bell_minutes = 0;
   out.tel_minutes = 0;
+  out.tel_1block_minutes = 0;
+  out.tel_long_minutes = 0;
+  out.tel_1block_slots = 0;
+  out.tel_long_slots = 0;
 
   let filledSlots = 0;
   let filledMinutes = 0;
@@ -3608,7 +3626,7 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
     if (dnMsg.includes(telBigText) || txtFlat.includes(telBigText) || (rs >= 10 && telHint)) return "excluded_tel_big";
     if (dn === "TEL" || dataStatus.includes("TEL") || txt.toUpperCase() === "TEL" || aria.includes("TEL") || title.includes("TEL") || cls.includes("TEL") || cls.includes("PHONE")) return "tel";
     if (txt === "×" || txt === "✕" || txt === "✖" || txt.includes("不可") || aria.includes("×") || title.includes("×") || cls.includes("NG")) return "bell";
-    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇"))) || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
+    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || txtFlat.includes("○先行") || txtFlat.includes("〇先行") || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇"))) || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
     if (cls.includes("BELL") || cls.includes("CROSS") || dataStatus.includes("NG")) return "bell";
     const bg = (getComputedStyle(td).backgroundImage || "").toLowerCase();
     if (bg.includes("bell") || bg.includes("cross") || bg.includes("ng")) return "bell";
@@ -3628,7 +3646,7 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
     return "other";
   }
 
-  function countSlot(r, c, t) {
+  function countSlot(r, c, t, telKind) {
     if (grid[r][c]) return;
     grid[r][c] = t;
     const minutes = rowMinutes[r] || 0;
@@ -3643,7 +3661,16 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
     out.total_slots += 1;
     if (t === "bell") out.bell_minutes += minutes;
     if (t === "maru") out.maru_minutes += minutes;
-    if (t === "tel") out.tel_minutes += minutes;
+    if (t === "tel") {
+      out.tel_minutes += minutes;
+      if (telKind === "long") {
+        out.tel_long_minutes += minutes;
+        out.tel_long_slots += 1;
+      } else if (telKind === "1block") {
+        out.tel_1block_minutes += minutes;
+        out.tel_1block_slots += 1;
+      }
+    }
     if (t === "bell" || t === "maru" || t === "tel") out.bookable_slots += 1;
   }
 
@@ -3658,11 +3685,12 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
       const rs = parseInt(td.getAttribute("rowspan") || "1", 10) || 1;
       const cs = parseInt(td.getAttribute("colspan") || "1", 10) || 1;
       const t = cellType(td, rs);
+      const telKind = (t === "tel" && rs > 1) ? "long" : ((t === "tel") ? "1block" : null);
       const rLimit = Math.min(rowCount, r + rs);
       const cLimit = Math.min(maxCols, col + cs);
       for (let rr = r; rr < rLimit; rr++) {
         for (let cc = col; cc < cLimit; cc++) {
-          countSlot(rr, cc, t);
+          countSlot(rr, cc, t, telKind);
         }
       }
 
