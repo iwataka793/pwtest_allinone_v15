@@ -1402,7 +1402,9 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
   function classifyCell(td, rs) {
     if (!td) return "other";
     const dn = (td.getAttribute("data-name") || "").trim().toUpperCase();
-    const dataMark = (td.getAttribute("data-mark") || "").trim().toUpperCase();
+    const dataMarkRaw = (td.getAttribute("data-mark") || "");
+    const dataMark = dataMarkRaw.trim().toUpperCase();
+    const dataMarkFlat = dataMarkRaw.replace(/\s+/g, "").toUpperCase();
     const dataStatus = (td.getAttribute("data-status") || "").trim().toUpperCase();
     const txt = (td.innerText || "").trim();
     const txtUpper = txt.toUpperCase();
@@ -1411,13 +1413,19 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
     const title = (td.getAttribute("title") || "").trim().toUpperCase();
     const cls = (td.className || "").toString().toUpperCase();
     const dnMsg = (td.getAttribute("data-name_message") || "").trim();
+    const dnMsgFlat = dnMsg.replace(/\s+/g, "");
     const telBigText = "お電話にてお問い合わせください";
-    const telHint = /TEL|電話|お問い合わせ/.test(txtFlat) || /TEL|電話|お問い合わせ/.test(dnMsg);
-    if (dnMsg.includes(telBigText) || txtFlat.includes(telBigText) || (rs >= 10 && telHint)) return "excluded_tel_big";
+    if (dnMsgFlat.includes(telBigText)) return "excluded_tel_big";
+    const spanMark = td.querySelector("span[data-mark]");
+    const spanMarkFlat = spanMark ? (spanMark.getAttribute("data-mark") || "").replace(/\s+/g, "") : "";
     if (dn === "TEL" || dataStatus.includes("TEL") || txtUpper === "TEL" || aria.includes("TEL") || title.includes("TEL") || cls.includes("TEL") || cls.includes("PHONE")) return "tel";
     // × は bell 扱い
     if (txt === "×" || txt === "✕" || txt === "✖" || txt.includes("不可") || aria.includes("×") || title.includes("×") || cls.includes("NG")) return "bell";
-    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || txtFlat.includes("○先行") || txtFlat.includes("〇先行") || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇"))) || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
+    if (dataMarkFlat === "○" || dataMarkFlat === "〇" || dataMarkFlat === "MARU" || dataMarkFlat === "○先行" || dataMarkFlat === "〇先行"
+        || spanMarkFlat === "○" || spanMarkFlat === "〇" || spanMarkFlat === "○先行" || spanMarkFlat === "〇先行"
+        || txt === "○" || txt === "〇" || txtFlat.includes("○先行") || txtFlat.includes("〇先行")
+        || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇")))
+        || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
     if (cls.includes("BELL") || cls.includes("CROSS") || dataStatus.includes("NG")) return "bell";
     const bg = (getComputedStyle(td).backgroundImage || "").toLowerCase();
     if (bg.includes("bell") || bg.includes("cross") || bg.includes("ng")) return "bell";
@@ -3614,19 +3622,27 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
   function cellType(td, rs){
     const txt = (td.innerText || "").trim();
     const dn = (td.getAttribute("data-name") || "").trim().toUpperCase();
-    const dataMark = (td.getAttribute("data-mark") || "").trim().toUpperCase();
+    const dataMarkRaw = (td.getAttribute("data-mark") || "");
+    const dataMark = dataMarkRaw.trim().toUpperCase();
+    const dataMarkFlat = dataMarkRaw.replace(/\s+/g, "").toUpperCase();
     const dataStatus = (td.getAttribute("data-status") || "").trim().toUpperCase();
     const aria = (td.getAttribute("aria-label") || "").trim().toUpperCase();
     const title = (td.getAttribute("title") || "").trim().toUpperCase();
     const cls = (td.className || "").toString().toUpperCase();
     const txtFlat = txt.replace(/\s+/g, "");
     const dnMsg = (td.getAttribute("data-name_message") || "").trim();
+    const dnMsgFlat = dnMsg.replace(/\s+/g, "");
     const telBigText = "お電話にてお問い合わせください";
-    const telHint = /TEL|電話|お問い合わせ/.test(txtFlat) || /TEL|電話|お問い合わせ/.test(dnMsg);
-    if (dnMsg.includes(telBigText) || txtFlat.includes(telBigText) || (rs >= 10 && telHint)) return "excluded_tel_big";
+    if (dnMsgFlat.includes(telBigText)) return "excluded_tel_big";
+    const spanMark = td.querySelector("span[data-mark]");
+    const spanMarkFlat = spanMark ? (spanMark.getAttribute("data-mark") || "").replace(/\s+/g, "") : "";
     if (dn === "TEL" || dataStatus.includes("TEL") || txt.toUpperCase() === "TEL" || aria.includes("TEL") || title.includes("TEL") || cls.includes("TEL") || cls.includes("PHONE")) return "tel";
     if (txt === "×" || txt === "✕" || txt === "✖" || txt.includes("不可") || aria.includes("×") || title.includes("×") || cls.includes("NG")) return "bell";
-    if (dataMark === "○" || dataMark === "MARU" || td.querySelector("span[data-mark='○']") || txt === "○" || txt === "〇" || txtFlat.includes("○先行") || txtFlat.includes("〇先行") || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇"))) || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
+    if (dataMarkFlat === "○" || dataMarkFlat === "〇" || dataMarkFlat === "MARU" || dataMarkFlat === "○先行" || dataMarkFlat === "〇先行"
+        || spanMarkFlat === "○" || spanMarkFlat === "〇" || spanMarkFlat === "○先行" || spanMarkFlat === "〇先行"
+        || txt === "○" || txt === "〇" || txtFlat.includes("○先行") || txtFlat.includes("〇先行")
+        || (txtFlat.includes("先行") && (txtFlat.includes("○") || txtFlat.includes("〇")))
+        || cls.includes("MARU") || cls.includes("CIRCLE") || cls.includes("OK") || aria.includes("○")) return "maru";
     if (cls.includes("BELL") || cls.includes("CROSS") || dataStatus.includes("NG")) return "bell";
     const bg = (getComputedStyle(td).backgroundImage || "").toLowerCase();
     if (bg.includes("bell") || bg.includes("cross") || bg.includes("ng")) return "bell";
@@ -4269,6 +4285,7 @@ def _delta_report(prev_rows, cur_rows, top_n=5, min_conf=0):
     }
 
 async def async_scrape_job(job, headless: bool, minimize_browser: bool, concurrency: int, nav_limiter: AsyncNavLimiter):
+    from playwright.async_api import TargetClosedError
     store_base = store_base_from_list_url(job.url)
     apw, browser, context = await _make_async_context(headless=headless, minimize_browser=minimize_browser)
     try:
@@ -4350,11 +4367,16 @@ async def async_scrape_job(job, headless: bool, minimize_browser: bool, concurre
             count_s = 0.0
             stats = None
             frame_url = None
+            p2 = None
 
-            async with sem:
-                p2 = await context.new_page()
-                p2.set_default_navigation_timeout(NAV_TIMEOUT_MS)
-                try:
+            try:
+                async with sem:
+                    try:
+                        p2 = await context.new_page()
+                    except TargetClosedError:
+                        log_event("WARN", "worker context closed", preset=job.name, gid=gid)
+                        return None
+                    p2.set_default_navigation_timeout(NAV_TIMEOUT_MS)
                     await nav_limiter.wait_turn()
                     goto_start = time.monotonic()
                     ok = await async_goto_retry(p2, res_url, wait_until="domcontentloaded", tries=2, preset=job.name, gid=gid)
@@ -4386,50 +4408,57 @@ async def async_scrape_job(job, headless: bool, minimize_browser: bool, concurre
                         "preset": job.name,
                         "list_url": job.url,
                     }
-                finally:
-                    total_s = time.monotonic() - start_total
-                    if _detail_log_enabled():
-                        detail = stats.get("_detail", {}) if isinstance(stats, dict) else {}
-                        sanity_retries = int(detail.get("sanity_retries", 0) or 0)
-                        sanity_reason = detail.get("sanity_last_reason")
-                        time_rows = stats.get("time_rows") if isinstance(stats, dict) else None
-                        max_cols = stats.get("max_cols") if isinstance(stats, dict) else None
-                        total_slots = stats.get("total_slots") if isinstance(stats, dict) else None
-                        td_count = stats.get("td_count") if isinstance(stats, dict) else None
-                        segments = {
-                            "goto": goto_s,
-                            "iframe_wait": iframe_wait_s,
-                            "count": count_s,
-                        }
-                        slowest_segment = max(segments, key=segments.get) if segments else "unknown"
-                        if sanity_retries:
-                            slowest_segment = f"{slowest_segment}+sanity_retry"
-                        log_event(
-                            "INFO",
-                            "calendar perf",
-                            preset=job.name,
-                            gid=gid,
-                            url=res_url,
-                            total_s=round(total_s, 3),
-                            goto_s=round(goto_s, 3),
-                            iframe_wait_s=round(iframe_wait_s, 3),
-                            count_s=round(count_s, 3),
-                            slowest_segment=slowest_segment,
-                            sanity_retries=sanity_retries,
-                            sanity_reason=sanity_reason,
-                            sanity_ok=bool(stats.get("ok")) if isinstance(stats, dict) else False,
-                            time_rows=time_rows,
-                            max_cols=max_cols,
-                            total_slots=total_slots,
-                            td_count=td_count,
-                        )
-                        if perf_records is not None:
-                            perf_records.append({
-                                "gid": gid,
-                                "url": res_url,
-                                "total_s": round(total_s, 3),
-                                "slowest_segment": slowest_segment,
-                            })
+            except TargetClosedError:
+                log_event("WARN", "worker target closed", preset=job.name, gid=gid)
+                return None
+            except Exception as e:
+                log_event("WARN", "worker error", preset=job.name, gid=gid, err=str(e)[:200])
+                return None
+            finally:
+                total_s = time.monotonic() - start_total
+                if _detail_log_enabled():
+                    detail = stats.get("_detail", {}) if isinstance(stats, dict) else {}
+                    sanity_retries = int(detail.get("sanity_retries", 0) or 0)
+                    sanity_reason = detail.get("sanity_last_reason")
+                    time_rows = stats.get("time_rows") if isinstance(stats, dict) else None
+                    max_cols = stats.get("max_cols") if isinstance(stats, dict) else None
+                    total_slots = stats.get("total_slots") if isinstance(stats, dict) else None
+                    td_count = stats.get("td_count") if isinstance(stats, dict) else None
+                    segments = {
+                        "goto": goto_s,
+                        "iframe_wait": iframe_wait_s,
+                        "count": count_s,
+                    }
+                    slowest_segment = max(segments, key=segments.get) if segments else "unknown"
+                    if sanity_retries:
+                        slowest_segment = f"{slowest_segment}+sanity_retry"
+                    log_event(
+                        "INFO",
+                        "calendar perf",
+                        preset=job.name,
+                        gid=gid,
+                        url=res_url,
+                        total_s=round(total_s, 3),
+                        goto_s=round(goto_s, 3),
+                        iframe_wait_s=round(iframe_wait_s, 3),
+                        count_s=round(count_s, 3),
+                        slowest_segment=slowest_segment,
+                        sanity_retries=sanity_retries,
+                        sanity_reason=sanity_reason,
+                        sanity_ok=bool(stats.get("ok")) if isinstance(stats, dict) else False,
+                        time_rows=time_rows,
+                        max_cols=max_cols,
+                        total_slots=total_slots,
+                        td_count=td_count,
+                    )
+                    if perf_records is not None:
+                        perf_records.append({
+                            "gid": gid,
+                            "url": res_url,
+                            "total_s": round(total_s, 3),
+                            "slowest_segment": slowest_segment,
+                        })
+                if p2 is not None:
                     try:
                         await p2.close()
                     except Exception:
@@ -4437,10 +4466,21 @@ async def async_scrape_job(job, headless: bool, minimize_browser: bool, concurre
 
         tasks = [asyncio.create_task(_worker(gid)) for gid in girl_ids]
         results = []
-        for t in asyncio.as_completed(tasks):
-            r = await t
-            if r and isinstance(r, dict):
-                results.append(r)
+        try:
+            for t in asyncio.as_completed(tasks):
+                try:
+                    r = await t
+                except Exception as e:
+                    log_event("WARN", "worker task failed", preset=job.name, err=str(e)[:200])
+                    continue
+                if r and isinstance(r, dict):
+                    results.append(r)
+        finally:
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         prev_rows = []
         for r in results:
