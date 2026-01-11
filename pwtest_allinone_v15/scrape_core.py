@@ -4312,6 +4312,15 @@ def _merge_rows_to_map(rows):
         m[key] = r
     return m
 
+def _is_target_closed(e: Exception) -> bool:
+    msg = str(e)
+    name = e.__class__.__name__
+    if "Target page, context or browser has been closed" in msg:
+        return True
+    if "TargetClosedError" in name:
+        return True
+    return False
+
 def _delta_report(prev_rows, cur_rows, top_n=5, min_conf=0):
     pm = _merge_rows_to_map(prev_rows or [])
     cm = _merge_rows_to_map(cur_rows or [])
@@ -4352,7 +4361,6 @@ def _delta_report(prev_rows, cur_rows, top_n=5, min_conf=0):
     }
 
 async def async_scrape_job(job, headless: bool, minimize_browser: bool, concurrency: int, nav_limiter: AsyncNavLimiter):
-    from playwright.async_api import TargetClosedError
     store_base = store_base_from_list_url(job.url)
     apw, browser, context = await _make_async_context(headless=headless, minimize_browser=minimize_browser)
     try:
@@ -4440,9 +4448,11 @@ async def async_scrape_job(job, headless: bool, minimize_browser: bool, concurre
                 async with sem:
                     try:
                         p2 = await context.new_page()
-                    except TargetClosedError:
-                        log_event("WARN", "worker context closed", preset=job.name, gid=gid)
-                        return None
+                    except Exception as e:
+                        if _is_target_closed(e):
+                            log_event("WARN", "worker context closed", preset=job.name, gid=gid)
+                            return None
+                        raise
                     p2.set_default_navigation_timeout(NAV_TIMEOUT_MS)
                     await nav_limiter.wait_turn()
                     goto_start = time.monotonic()
@@ -4475,10 +4485,10 @@ async def async_scrape_job(job, headless: bool, minimize_browser: bool, concurre
                         "preset": job.name,
                         "list_url": job.url,
                     }
-            except TargetClosedError:
-                log_event("WARN", "worker target closed", preset=job.name, gid=gid)
-                return None
             except Exception as e:
+                if _is_target_closed(e):
+                    log_event("WARN", "worker target closed", preset=job.name, gid=gid)
+                    return None
                 log_event("WARN", "worker error", preset=job.name, gid=gid, err=str(e)[:200])
                 return None
             finally:
@@ -4538,6 +4548,9 @@ async def async_scrape_job(job, headless: bool, minimize_browser: bool, concurre
                 try:
                     r = await t
                 except Exception as e:
+                    if _is_target_closed(e):
+                        log_event("WARN", "worker task target closed", preset=job.name, err=str(e)[:200])
+                        continue
                     log_event("WARN", "worker task failed", preset=job.name, err=str(e)[:200])
                     continue
                 if r and isinstance(r, dict):
