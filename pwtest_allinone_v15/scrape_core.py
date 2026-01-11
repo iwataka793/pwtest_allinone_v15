@@ -237,6 +237,58 @@ def _looks_like_all_dash(stats: dict) -> bool:
         return False
     return (dash / total) >= _ALL_DASH_RATIO
 
+def _validate_stats(stats: dict, preset: str = None, gid: str = None):
+    if not isinstance(stats, dict):
+        return
+    if not stats.get("ok"):
+        return
+    try:
+        tel_minutes = float(stats.get("tel_minutes") or 0)
+        tel_1block_minutes = float(stats.get("tel_1block_minutes") or 0)
+        tel_long_minutes = float(stats.get("tel_long_minutes") or 0)
+    except Exception:
+        return
+    tol = 0.5
+    if abs(tel_minutes - (tel_1block_minutes + tel_long_minutes)) > tol:
+        log_event(
+            "WARN",
+            "tel minutes mismatch",
+            preset=preset,
+            gid=gid,
+            tel_minutes=tel_minutes,
+            tel_1block_minutes=tel_1block_minutes,
+            tel_long_minutes=tel_long_minutes,
+        )
+    tel_long_cells = int(stats.get("tel_long_cells") or stats.get("tel_long_slots") or 0)
+    if tel_long_cells > 0 and tel_long_minutes == 0:
+        log_event(
+            "WARN",
+            "tel long minutes zero",
+            preset=preset,
+            gid=gid,
+            tel_long_cells=tel_long_cells,
+            tel_long_minutes=tel_long_minutes,
+        )
+    excluded_minutes = float(stats.get("excluded_tel_big_minutes") or 0)
+    if excluded_minutes > 0:
+        total_slots = int(stats.get("total_slots") or 0)
+        excluded_cells = int(stats.get("excluded_tel_big_cells") or stats.get("excluded_tel_big") or 0)
+        time_rows = int(stats.get("time_rows") or 0)
+        max_cols = int(stats.get("max_cols") or 0)
+        expected_total = time_rows * max_cols if time_rows and max_cols else 0
+        if expected_total:
+            combined = total_slots + excluded_cells
+            if abs(combined - expected_total) > 1:
+                log_event(
+                    "WARN",
+                    "excluded tel big mismatch",
+                    preset=preset,
+                    gid=gid,
+                    expected_total=expected_total,
+                    total_slots=total_slots,
+                    excluded_cells=excluded_cells,
+                )
+
 def _is_not_reservable_page_sync(page) -> tuple[bool, str]:
     """
     例外ページ（「該当の女の子は予約できません」等）を検出して、カレンダー待ちの無駄なタイムアウトを回避する。
@@ -1395,6 +1447,9 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
   out.tel_long_minutes = 0;
   out.tel_1block_slots = 0;
   out.tel_long_slots = 0;
+  out.tel_1block_cells = 0;
+  out.tel_long_cells = 0;
+  out.excluded_tel_big_cells = 0;
 
   let filledSlots = 0;
   let filledMinutes = 0;
@@ -1455,6 +1510,7 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
     if (t === "excluded_tel_big") {
       out.excluded_tel_big = (out.excluded_tel_big || 0) + 1;
       out.excluded_tel_big_minutes += minutes;
+      out.excluded_tel_big_cells += 1;
       return;
     }
     out[t] = (out[t] || 0) + 1;
@@ -1466,9 +1522,11 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
       if (telKind === "long") {
         out.tel_long_minutes += minutes;
         out.tel_long_slots += 1;
+        out.tel_long_cells += 1;
       } else if (telKind === "1block") {
         out.tel_1block_minutes += minutes;
         out.tel_1block_slots += 1;
+        out.tel_1block_cells += 1;
       }
     }
     if (t === "bell" || t === "maru" || t === "tel") out.bookable_slots += 1;
@@ -1557,6 +1615,7 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
                                 "sanity_retries": sanity_retry_count,
                                 "sanity_last_reason": sanity_last_reason,
                             }
+                        _validate_stats(stats, preset=preset, gid=gid)
                         stable_attempts += 1
                         light_sig = (stats.get("time_rows", 0), stats.get("max_cols", 0), stats.get("td_count", 0))
                         if light_sig == last_light_sig:
@@ -3616,6 +3675,10 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
   out.tel_1block_slots = 0;
   out.tel_long_slots = 0;
 
+  out.tel_1block_cells = 0;
+  out.tel_long_cells = 0;
+  out.excluded_tel_big_cells = 0;
+
   let filledSlots = 0;
   let filledMinutes = 0;
 
@@ -3671,6 +3734,7 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
     if (t === "excluded_tel_big") {
       out.excluded_tel_big = (out.excluded_tel_big || 0) + 1;
       out.excluded_tel_big_minutes += minutes;
+      out.excluded_tel_big_cells += 1;
       return;
     }
     out[t] = (out[t] || 0) + 1;
@@ -3682,9 +3746,11 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
       if (telKind === "long") {
         out.tel_long_minutes += minutes;
         out.tel_long_slots += 1;
+        out.tel_long_cells += 1;
       } else if (telKind === "1block") {
         out.tel_1block_minutes += minutes;
         out.tel_1block_slots += 1;
+        out.tel_1block_cells += 1;
       }
     }
     if (t === "bell" || t === "maru" || t === "tel") out.bookable_slots += 1;
@@ -3805,6 +3871,7 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
                                 "sanity_retries": sanity_retry_count,
                                 "sanity_last_reason": sanity_last_reason,
                             }
+                        _validate_stats(stats, preset=preset, gid=gid)
                         last_stats = stats
                         if _detail_log_enabled():
                             log_event(

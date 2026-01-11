@@ -10,6 +10,24 @@ import sys
 from scrape_core import *  # noqa: F401,F403
 from scrape_core import _now_ts, _safe_name, _detail_log_enabled  # '_' names are not imported by '*'
 
+def to_disp_mark(kind_or_text: str) -> str:
+    raw = "" if kind_or_text is None else str(kind_or_text)
+    if not raw.strip():
+        return "－"
+    flat = "".join(raw.split())
+    lower = flat.lower()
+    if "excluded_tel_big" in lower or "お電話にてお問い合わせください" in raw:
+        return "∅"
+    if lower in ("dash", "none") or flat in ("-", "―", "‐", "–", "—", "ー", "－"):
+        return "－"
+    if "tel" in lower or "☎" in flat or "📞" in flat or "TEL" in raw.upper():
+        return "☎"
+    if "bell" in lower or "🔔" in flat:
+        return "🔔"
+    if "maru" in lower or "○" in flat or "〇" in flat or ("先行" in flat and ("○" in flat or "〇" in flat)):
+        return "○"
+    return raw
+
 
 class CastDetailPanel(ttk.Frame):
     def __init__(self, app, master, show_close=False, on_close=None):
@@ -228,9 +246,9 @@ class CastDetailPanel(ttk.Frame):
             ("score", "Score", 80),
             ("big_score", "BD", 80),
             ("conf", "Conf", 70),
-            ("bell", "Bell", 60),
-            ("maru", "Maru", 60),
-            ("tel", "Tel", 60),
+            ("bell", to_disp_mark("bell"), 60),
+            ("maru", to_disp_mark("maru"), 60),
+            ("tel", to_disp_mark("tel"), 60),
             ("bookable", "Bookable", 80),
             ("total", "Total", 70),
         ]
@@ -527,7 +545,15 @@ class App(tk.Tk):
 
         ttk.Label(top, text="ソート").grid(row=2, column=5, sticky="e", pady=(10,0))
         self.combo_sort = ttk.Combobox(top, width=14, state="readonly",
-                                       values=["総合スコア","ビッグデータ","bell率","ベル数","空き(○)","TEL多い","bookable多い"])
+                                       values=[
+                                           "総合スコア",
+                                           "ビッグデータ",
+                                           f"{to_disp_mark('bell')}率",
+                                           f"{to_disp_mark('bell')}数",
+                                           f"空き({to_disp_mark('maru')})",
+                                           f"{to_disp_mark('tel')}多い",
+                                           "bookable多い",
+                                       ])
         self.combo_sort.grid(row=2, column=6, sticky="w", padx=6, pady=(10,0))
         self.combo_sort.set("総合スコア")
         self.combo_sort.bind("<<ComboboxSelected>>", lambda e: self.resort_view())
@@ -600,7 +626,20 @@ class App(tk.Tk):
         self.tree = ttk.Treeview(right, columns=cols, show="headings", height=18)
         self.tree.pack(fill="both", expand=True, pady=6)
 
-        headings = {"rank":"Rank","score":"Score","big":"BD","delta":"Δpop","conf":"Conf","rate":"bell%","bell":"🔔","maru":"○","tel":"📞","bookable":"Bookable","total":"Total","name":"Name"}
+        headings = {
+            "rank": "Rank",
+            "score": "Score",
+            "big": "BD",
+            "delta": "Δpop",
+            "conf": "Conf",
+            "rate": f"{to_disp_mark('bell')}%",
+            "bell": to_disp_mark("bell"),
+            "maru": to_disp_mark("maru"),
+            "tel": to_disp_mark("tel"),
+            "bookable": "Bookable",
+            "total": "Total",
+            "name": "Name",
+        }
         widths = {"rank":60,"score":80,"big":80,"delta":75,"conf":70,"rate":80,"bell":60,"maru":60,"tel":60,"bookable":95,"total":75,"name":270}
         for c in cols:
             self.tree.heading(c, text=headings[c])
@@ -1607,15 +1646,19 @@ class App(tk.Tk):
 
     def sort_rows(self, rows):
         keyname = self.combo_sort.get()
+        bell_rate_label = f"{to_disp_mark('bell')}率"
+        bell_count_label = f"{to_disp_mark('bell')}数"
+        maru_label = f"空き({to_disp_mark('maru')})"
+        tel_label = f"{to_disp_mark('tel')}多い"
         if keyname == "ビッグデータ":
             rows.sort(key=lambda r: (r.get("big_score") if r.get("big_score") is not None else r.get("score",0)), reverse=True)
-        elif keyname == "bell率":
+        elif keyname in ("bell率", bell_rate_label):
             rows.sort(key=lambda r: (r["stats"].get("bell_rate_bookable") is not None, r["stats"].get("bell_rate_bookable") or 0), reverse=True)
-        elif keyname == "ベル数":
+        elif keyname in ("ベル数", bell_count_label):
             rows.sort(key=lambda r: (r["stats"].get("bell",0) or 0), reverse=True)
-        elif keyname == "空き(○)":
+        elif keyname in ("空き(○)", maru_label):
             rows.sort(key=lambda r: (r["stats"].get("maru",0) or 0), reverse=True)
-        elif keyname == "TEL多い":
+        elif keyname in ("TEL多い", tel_label):
             rows.sort(key=lambda r: (r["stats"].get("tel",0) or 0), reverse=True)
         elif keyname == "bookable多い":
             rows.sort(key=lambda r: (r["stats"].get("bookable_slots",0) or 0), reverse=True)
