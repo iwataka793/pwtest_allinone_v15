@@ -35,6 +35,7 @@ class CastDetailPanel(ttk.Frame):
         self.var_cast_ma3 = tk.StringVar(value="N/A")
         self.var_cast_ma14 = tk.StringVar(value="N/A")
         self.var_cast_ma28 = tk.StringVar(value="N/A")
+        self.var_cast_ma_display = tk.StringVar(value=str(self.app.bd_ma_windows[0]))
         self.var_cast_ma_labels = [
             tk.StringVar(value="ma3_cast_big_score"),
             tk.StringVar(value="ma14_cast_big_score"),
@@ -53,7 +54,8 @@ class CastDetailPanel(ttk.Frame):
         self.ma_samples = []
         self.cast_samples = []
         self.cast_series_desc = []
-        self.app.bd_ma_display_var.trace_add("write", lambda *_: self._on_ma_display_change())
+        self.app.bd_ma_display_var.trace_add("write", lambda *_: self._on_summary_ma_display_change())
+        self.var_cast_ma_display.trace_add("write", lambda *_: self._on_cast_ma_display_change())
         self._build_ui()
 
     def _build_ui(self):
@@ -107,10 +109,21 @@ class CastDetailPanel(ttk.Frame):
         cast_info.pack(fill="x", padx=6, pady=(0, 4))
         ttk.Label(cast_info, text="samples_used").grid(row=0, column=0, sticky="w", padx=6, pady=2)
         ttk.Label(cast_info, textvariable=self.var_cast_samples).grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        cast_display_frame = ttk.Frame(cast_info)
+        cast_display_frame.grid(row=0, column=2, sticky="e", padx=6, pady=2)
+        ttk.Label(cast_display_frame, text="表示MA").pack(side="left")
+        ttk.Combobox(
+            cast_display_frame,
+            width=4,
+            state="readonly",
+            textvariable=self.var_cast_ma_display,
+            values=[str(w) for w in self.app.bd_ma_windows],
+        ).pack(side="left", padx=(4, 0))
         cast_value_vars = [self.var_cast_ma3, self.var_cast_ma14, self.var_cast_ma28]
         for idx, (label_var, value_var) in enumerate(zip(self.var_cast_ma_labels, cast_value_vars), start=1):
             ttk.Label(cast_info, textvariable=label_var).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
             ttk.Label(cast_info, textvariable=value_var).grid(row=idx, column=1, sticky="w", padx=6, pady=2)
+        cast_info.columnconfigure(2, weight=1)
         cast_info.columnconfigure(1, weight=1)
 
         cast_graph_frame = ttk.LabelFrame(cast_panel, text="選択キャスト big_score 履歴")
@@ -454,9 +467,11 @@ class CastDetailPanel(ttk.Frame):
     def _on_toggle_ma(self):
         self._redraw_ma_graphs()
 
-    def _on_ma_display_change(self):
+    def _on_summary_ma_display_change(self):
         summary = self.app._get_bd_daily_summary(self.snap or {}, self.day or "")[2]
         self._update_summary_ma_display(summary)
+
+    def _on_cast_ma_display_change(self):
         self._update_cast_ma_display()
 
     def _update_summary_ma_display(self, summary):
@@ -469,7 +484,7 @@ class CastDetailPanel(ttk.Frame):
         )
 
     def _update_cast_ma_display(self):
-        window_values = self.app._get_display_windows(self.app.bd_ma_display_var.get())
+        window_values = self.app._get_display_windows(self.var_cast_ma_display.get())
         cast_value_vars = [self.var_cast_ma3, self.var_cast_ma14, self.var_cast_ma28]
         for idx, window in enumerate(window_values):
             label = f"ma{window}_cast_big_score" if window else "ma--_cast_big_score"
@@ -2208,6 +2223,7 @@ class App(tk.Tk):
         label_frame = ttk.Frame(frame)
         label_frame.grid(row=0, column=0, sticky="w", padx=6, pady=2)
         ttk.Label(label_frame, textvariable=label_vars[0]).pack(side="left")
+        ttk.Label(label_frame, text="表示MA").pack(side="left", padx=(8, 0))
         combo = ttk.Combobox(
             label_frame,
             width=4,
