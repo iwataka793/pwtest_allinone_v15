@@ -75,13 +75,12 @@ class CastDetailPanel(ttk.Frame):
         ma_content.pack(fill="both", padx=6, pady=6)
         ma_opts = ttk.Frame(ma_content)
         ma_opts.pack(side="left", fill="y", padx=(0, 6))
-        for window in self.app.bd_ma_windows:
-            ttk.Checkbutton(
-                ma_opts,
-                text=f"MA{window}",
-                variable=self.app.bd_ma_vars[window],
-                command=self._on_toggle_ma,
-            ).pack(anchor="w")
+        ttk.Checkbutton(
+            ma_opts,
+            text="MA: 長期(56/84/112)",
+            variable=self.app.bd_ma_long_mode,
+            command=self._on_toggle_ma,
+        ).pack(anchor="w")
         self.ma_canvas = tk.Canvas(ma_content, width=360, height=120, bg="white", highlightthickness=1, highlightbackground="#ddd")
         self.ma_canvas.pack(side="left", fill="both", expand=True)
 
@@ -115,7 +114,7 @@ class CastDetailPanel(ttk.Frame):
         ttk.Combobox(
             cast_display_frame,
             width=4,
-            state="readonly",
+            state="disabled",
             textvariable=self.var_cast_ma_display,
             values=[str(w) for w in self.app.bd_ma_windows],
         ).pack(side="left", padx=(4, 0))
@@ -465,6 +464,9 @@ class CastDetailPanel(ttk.Frame):
         self._bind_cast_actions()
 
     def _on_toggle_ma(self):
+        self.app._apply_bd_ma_mode(self.app.bd_ma_long_mode.get())
+        self.var_cast_ma_display.set(self.app.bd_ma_display_var.get())
+        self._update_cast_ma_display()
         self._redraw_ma_graphs()
 
     def _on_summary_ma_display_change(self):
@@ -550,6 +552,7 @@ class App(tk.Tk):
         self.var_showlog = tk.BooleanVar(value=False)
         self.var_beep = tk.BooleanVar(value=True)
         self.bd_ma_windows = (3, 14, 28, 56, 84, 112)
+        self.bd_ma_long_mode = tk.BooleanVar(value=False)
         self.bd_ma_vars = {
             3: tk.BooleanVar(value=True),
             14: tk.BooleanVar(value=True),
@@ -2182,18 +2185,9 @@ class App(tk.Tk):
         return frame
 
     def _get_display_windows(self, window_value):
-        windows = list(self.bd_ma_windows)
-        try:
-            selected = int(window_value)
-        except Exception:
-            selected = windows[0]
-        if selected not in windows:
-            selected = windows[0]
-        start_idx = windows.index(selected)
-        display = windows[start_idx:start_idx + 3]
-        while len(display) < 3:
-            display.append(None)
-        return display
+        short_windows = [3, 14, 28]
+        long_windows = [56, 84, 112]
+        return long_windows if self.bd_ma_long_mode.get() else short_windows
 
     def _format_ma_summary_value(self, window, summary, samples):
         if not window:
@@ -2227,7 +2221,7 @@ class App(tk.Tk):
         combo = ttk.Combobox(
             label_frame,
             width=4,
-            state="readonly",
+            state="disabled",
             textvariable=combo_var,
             values=[str(w) for w in self.bd_ma_windows],
         )
@@ -2364,6 +2358,16 @@ class App(tk.Tk):
                 ma_points.append((x_positions[i], y))
             if len(ma_points) > 1:
                 canvas.create_line(ma_points, fill=ma_colors.get(window, "#555"), width=1)
+
+    def _apply_bd_ma_mode(self, long_mode):
+        short_windows = (3, 14, 28)
+        long_windows = (56, 84, 112)
+        active = long_windows if long_mode else short_windows
+        for window in self.bd_ma_windows:
+            var = self.bd_ma_vars.get(window)
+            if var is not None:
+                var.set(window in active)
+        self.bd_ma_display_var.set(str(active[0]))
 
     def _get_cast_score_series(self, gid, upto_day):
         if not gid or not upto_day:
