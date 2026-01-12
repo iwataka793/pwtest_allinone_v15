@@ -35,6 +35,8 @@ class CastDetailPanel(ttk.Frame):
         self.var_cast_ma3 = tk.StringVar(value="N/A")
         self.var_cast_ma14 = tk.StringVar(value="N/A")
         self.var_cast_ma28 = tk.StringVar(value="N/A")
+        self.ma_samples = []
+        self.cast_samples = []
         self._build_ui()
 
     def _build_ui(self):
@@ -50,8 +52,19 @@ class CastDetailPanel(ttk.Frame):
 
         self.ma_graph_frame = ttk.LabelFrame(self.summary_panel, text="MA推移 (avg_big_score / 直近最大28)")
         self.ma_graph_frame.pack(side="right", fill="x", padx=6, pady=4)
-        self.ma_canvas = tk.Canvas(self.ma_graph_frame, width=360, height=120, bg="white", highlightthickness=1, highlightbackground="#ddd")
-        self.ma_canvas.pack(fill="both", padx=6, pady=6)
+        ma_content = ttk.Frame(self.ma_graph_frame)
+        ma_content.pack(fill="both", padx=6, pady=6)
+        ma_opts = ttk.Frame(ma_content)
+        ma_opts.pack(side="left", fill="y", padx=(0, 6))
+        for window in self.app.bd_ma_windows:
+            ttk.Checkbutton(
+                ma_opts,
+                text=f"MA{window}",
+                variable=self.app.bd_ma_vars[window],
+                command=self._on_toggle_ma,
+            ).pack(anchor="w")
+        self.ma_canvas = tk.Canvas(ma_content, width=360, height=120, bg="white", highlightthickness=1, highlightbackground="#ddd")
+        self.ma_canvas.pack(side="left", fill="both", expand=True)
 
         self.toggle_frame = ttk.Frame(self)
         self.toggle_frame.pack(fill="x", padx=6, pady=(0, 4))
@@ -129,6 +142,10 @@ class CastDetailPanel(ttk.Frame):
         self.rows = []
         self.var_day.set(f"日付: {day}")
         self.var_show_delta.set(False)
+        self.ma_samples = []
+        self.cast_samples = []
+        self.app._draw_ma_graph(self.ma_canvas, self.ma_samples)
+        self.app._draw_ma_graph(self.cast_canvas, self.cast_samples)
         for child in self.summary_blocks.winfo_children():
             child.destroy()
         self.delta_note.configure(text="")
@@ -180,7 +197,8 @@ class CastDetailPanel(ttk.Frame):
                     samples.append((d, float(val)))
             if len(samples) > 28:
                 samples = samples[-28:]
-        self.app._draw_ma_graph(self.ma_canvas, samples)
+        self.ma_samples = samples
+        self.app._draw_ma_graph(self.ma_canvas, self.ma_samples)
 
         extra_keys = [
             "prev_seen_day",
@@ -434,11 +452,19 @@ class CastDetailPanel(ttk.Frame):
         self.var_cast_ma28.set(fmt_ma(calc_ma(28)))
 
         series = list(reversed(series_desc))
-        self.app._draw_ma_graph(self.cast_canvas, series)
+        self.cast_samples = series
+        self.app._draw_ma_graph(self.cast_canvas, self.cast_samples)
 
     def _on_toggle_delta(self):
         self._populate_tree(self.var_show_delta.get())
         self._bind_cast_actions()
+
+    def _on_toggle_ma(self):
+        self._redraw_ma_graphs()
+
+    def _redraw_ma_graphs(self):
+        self.app._draw_ma_graph(self.ma_canvas, self.ma_samples)
+        self.app._draw_ma_graph(self.cast_canvas, self.cast_samples)
 
     def copy_all(self):
         if not self.tree:
@@ -486,6 +512,15 @@ class App(tk.Tk):
 
         self.var_showlog = tk.BooleanVar(value=False)
         self.var_beep = tk.BooleanVar(value=True)
+        self.bd_ma_windows = (3, 14, 28, 56, 84, 112)
+        self.bd_ma_vars = {
+            3: tk.BooleanVar(value=True),
+            14: tk.BooleanVar(value=True),
+            28: tk.BooleanVar(value=True),
+            56: tk.BooleanVar(value=False),
+            84: tk.BooleanVar(value=False),
+            112: tk.BooleanVar(value=False),
+        }
 
         self._build_ui()
         self._refresh_preset_combo()
@@ -2132,6 +2167,20 @@ class App(tk.Tk):
             ("ma28_samples_avg_big_score", summary["ma28_samples_avg_big_score"]),
         ])
 
+    def _calc_moving_average(self, values, window):
+        if window <= 0:
+            return []
+        count = len(values)
+        if count < window:
+            return []
+        result = [None] * (window - 1)
+        running_sum = sum(values[:window])
+        result.append(running_sum / window)
+        for i in range(window, count):
+            running_sum += values[i] - values[i - window]
+            result.append(running_sum / window)
+        return result
+
     def _draw_ma_graph(self, canvas, samples):
         canvas.delete("all")
         width = int(canvas["width"])
@@ -2148,14 +2197,40 @@ class App(tk.Tk):
         usable_w = max(width - padding * 2, 1)
         usable_h = max(height - padding * 2, 1)
         points = []
+        x_positions = []
         for i, (_, val) in enumerate(samples):
             x = padding if count == 1 else padding + (usable_w * i / (count - 1))
             y = padding + (usable_h * (1 - (val - min_v) / span))
             points.append((x, y))
+            x_positions.append(x)
         if len(points) > 1:
             canvas.create_line(points, fill="#2b6cb0", width=2)
         for x, y in points:
             canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#2b6cb0", outline="")
+
+        ma_colors = {
+            3: "#d53f8c",
+            14: "#38a169",
+            28: "#dd6b20",
+            56: "#4a5568",
+            84: "#718096",
+            112: "#2d3748",
+        }
+        for window in self.bd_ma_windows:
+            var = self.bd_ma_vars.get(window)
+            if not var or not var.get():
+                continue
+            ma_values = self._calc_moving_average(values, window)
+            if not ma_values:
+                continue
+            ma_points = []
+            for i, val in enumerate(ma_values):
+                if val is None:
+                    continue
+                y = padding + (usable_h * (1 - (val - min_v) / span))
+                ma_points.append((x_positions[i], y))
+            if len(ma_points) > 1:
+                canvas.create_line(ma_points, fill=ma_colors.get(window, "#555"), width=1)
 
     def _get_cast_score_series(self, gid, upto_day):
         if not gid or not upto_day:
