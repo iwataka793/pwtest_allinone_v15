@@ -110,14 +110,18 @@ class CastDetailPanel(ttk.Frame):
         ttk.Label(cast_info, textvariable=self.var_cast_samples).grid(row=0, column=1, sticky="w", padx=6, pady=2)
         cast_display_frame = ttk.Frame(cast_info)
         cast_display_frame.grid(row=0, column=2, sticky="e", padx=6, pady=2)
-        ttk.Label(cast_display_frame, text="表示MA").pack(side="left")
-        ttk.Combobox(
+        cast_display_label = ttk.Label(cast_display_frame, text="表示MA")
+        cast_display_label.pack(side="left")
+        cast_display_combo = ttk.Combobox(
             cast_display_frame,
             width=4,
             state="disabled",
             textvariable=self.var_cast_ma_display,
             values=[str(w) for w in self.app.bd_ma_windows],
-        ).pack(side="left", padx=(4, 0))
+        )
+        cast_display_combo.pack(side="left", padx=(4, 0))
+        cast_display_label.pack_forget()
+        cast_display_combo.pack_forget()
         cast_value_vars = [self.var_cast_ma3, self.var_cast_ma14, self.var_cast_ma28]
         for idx, (label_var, value_var) in enumerate(zip(self.var_cast_ma_labels, cast_value_vars), start=1):
             ttk.Label(cast_info, textvariable=label_var).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
@@ -466,6 +470,8 @@ class CastDetailPanel(ttk.Frame):
     def _on_toggle_ma(self):
         self.app._apply_bd_ma_mode(self.app.bd_ma_long_mode.get())
         self.var_cast_ma_display.set(self.app.bd_ma_display_var.get())
+        summary = self.app._get_bd_daily_summary(self.snap or {}, self.day or "")[2]
+        self._update_summary_ma_display(summary)
         self._update_cast_ma_display()
         self._redraw_ma_graphs()
 
@@ -2217,7 +2223,8 @@ class App(tk.Tk):
         label_frame = ttk.Frame(frame)
         label_frame.grid(row=0, column=0, sticky="w", padx=6, pady=2)
         ttk.Label(label_frame, textvariable=label_vars[0]).pack(side="left")
-        ttk.Label(label_frame, text="表示MA").pack(side="left", padx=(8, 0))
+        display_label = ttk.Label(label_frame, text="表示MA")
+        display_label.pack(side="left", padx=(8, 0))
         combo = ttk.Combobox(
             label_frame,
             width=4,
@@ -2226,6 +2233,8 @@ class App(tk.Tk):
             values=[str(w) for w in self.bd_ma_windows],
         )
         combo.pack(side="left", padx=(4, 0))
+        display_label.pack_forget()
+        combo.pack_forget()
         for idx in range(1, 3):
             ttk.Label(frame, textvariable=label_vars[idx]).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
         for idx, value_var in enumerate(value_vars):
