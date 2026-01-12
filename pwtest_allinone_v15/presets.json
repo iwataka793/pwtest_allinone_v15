@@ -1,0 +1,86 @@
+{
+  "urls": "https://www.cityheaven.net/saitama/A1101/A110101/platinum/girllist/\nhttps://www.cityheaven.net/saitama/A1101/A110101/anecote/girllist/?lo=1\nhttps://www.cityheaven.net/saitama/A1102/A110201/fortune/girllist/?lo=1",
+  "min_bell": "1",
+  "max_pages": "6",
+  "exclude": "",
+  "include": "",
+  "timeout": "45000",
+  "after_wait": "600",
+  "headless": true,
+  "wait_calendar": false,
+  "open_in_browser": true,
+  "sort": "score",
+  "order": "desc",
+  "presets": [
+    {
+      "name": "fortune",
+      "url": "https://www.cityheaven.net/saitama/A1102/A110201/fortune/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "anecote",
+      "url": "https://www.cityheaven.net/saitama/A1101/A110101/anecote/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "natural-swim",
+      "url": "https://www.cityheaven.net/saitama/A1101/A110101/natural-swim/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "megapalace",
+      "url": "https://www.cityheaven.net/saitama/A1102/A110201/megapalace/girllist/",
+      "max": 100
+    },
+    {
+      "name": "tiara",
+      "url": "https://www.cityheaven.net/saitama/A1102/A110201/tiara/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "yamatonadeshiko",
+      "url": "https://www.cityheaven.net/saitama/A1102/A110201/yamatonadeshiko/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "ruby",
+      "url": "https://www.cityheaven.net/saitama/A1102/A110201/ruby_nk/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "loveandpeas",
+      "url": "https://www.cityheaven.net/saitama/A1101/A110101/loveomiya/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "md-007",
+      "url": "https://www.cityheaven.net/tokyo/A1311/A131101/md-007/girllist/",
+      "max": 100
+    },
+    {
+      "name": "monte",
+      "url": "https://www.cityheaven.net/tochigi/A0901/A090101/monte/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "platinum",
+      "url": "https://www.cityheaven.net/saitama/A1101/A110101/platinum/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "lemon",
+      "url": "https://www.cityheaven.net/saitama/A1101/A110101/lemon/girllist/?lo=1",
+      "max": 100
+    },
+    {
+      "name": "fuyajyou",
+      "url": "https://www.cityheaven.net/saitama/A1101/A110101/fuyajyou/girllist/",
+      "max": 200
+    }
+  ],
+  "queue_selected": [
+    "fortune",
+    "natural-swim",
+    "megapalace"
+  ]
+}
