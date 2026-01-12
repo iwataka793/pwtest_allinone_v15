@@ -35,8 +35,25 @@ class CastDetailPanel(ttk.Frame):
         self.var_cast_ma3 = tk.StringVar(value="N/A")
         self.var_cast_ma14 = tk.StringVar(value="N/A")
         self.var_cast_ma28 = tk.StringVar(value="N/A")
+        self.var_cast_ma_labels = [
+            tk.StringVar(value="ma3_cast_big_score"),
+            tk.StringVar(value="ma14_cast_big_score"),
+            tk.StringVar(value="ma28_cast_big_score"),
+        ]
+        self.var_summary_ma_labels = [
+            tk.StringVar(value="ma3_samples_avg_big_score"),
+            tk.StringVar(value="ma14_samples_avg_big_score"),
+            tk.StringVar(value="ma28_samples_avg_big_score"),
+        ]
+        self.var_summary_ma_values = [
+            tk.StringVar(value="N/A"),
+            tk.StringVar(value="N/A"),
+            tk.StringVar(value="N/A"),
+        ]
         self.ma_samples = []
         self.cast_samples = []
+        self.cast_series_desc = []
+        self.app.bd_ma_display_var.trace_add("write", lambda *_: self._on_ma_display_change())
         self._build_ui()
 
     def _build_ui(self):
@@ -50,7 +67,7 @@ class CastDetailPanel(ttk.Frame):
         self.summary_blocks = ttk.Frame(self.summary_panel)
         self.summary_blocks.pack(side="left", fill="x", expand=True)
 
-        self.ma_graph_frame = ttk.LabelFrame(self.summary_panel, text="MA推移 (avg_big_score / 直近最大28)")
+        self.ma_graph_frame = ttk.LabelFrame(self.summary_panel, text="MA推移 (avg_big_score / 履歴)")
         self.ma_graph_frame.pack(side="right", fill="x", padx=6, pady=4)
         ma_content = ttk.Frame(self.ma_graph_frame)
         ma_content.pack(fill="both", padx=6, pady=6)
@@ -88,18 +105,15 @@ class CastDetailPanel(ttk.Frame):
 
         cast_info = ttk.LabelFrame(cast_left, text="MA（選択キャスト）")
         cast_info.pack(fill="x", padx=6, pady=(0, 4))
-        labels = [
-            ("samples_used", self.var_cast_samples),
-            ("ma3_cast_big_score", self.var_cast_ma3),
-            ("ma14_cast_big_score", self.var_cast_ma14),
-            ("ma28_cast_big_score", self.var_cast_ma28),
-        ]
-        for idx, (label, var) in enumerate(labels):
-            ttk.Label(cast_info, text=label).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
-            ttk.Label(cast_info, textvariable=var).grid(row=idx, column=1, sticky="w", padx=6, pady=2)
+        ttk.Label(cast_info, text="samples_used").grid(row=0, column=0, sticky="w", padx=6, pady=2)
+        ttk.Label(cast_info, textvariable=self.var_cast_samples).grid(row=0, column=1, sticky="w", padx=6, pady=2)
+        cast_value_vars = [self.var_cast_ma3, self.var_cast_ma14, self.var_cast_ma28]
+        for idx, (label_var, value_var) in enumerate(zip(self.var_cast_ma_labels, cast_value_vars), start=1):
+            ttk.Label(cast_info, textvariable=label_var).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
+            ttk.Label(cast_info, textvariable=value_var).grid(row=idx, column=1, sticky="w", padx=6, pady=2)
         cast_info.columnconfigure(1, weight=1)
 
-        cast_graph_frame = ttk.LabelFrame(cast_panel, text="選択キャスト big_score 履歴 (直近最大28)")
+        cast_graph_frame = ttk.LabelFrame(cast_panel, text="選択キャスト big_score 履歴")
         cast_graph_frame.pack(side="right", fill="x", padx=6, pady=4)
         self.cast_canvas = tk.Canvas(cast_graph_frame, width=360, height=120, bg="white", highlightthickness=1, highlightbackground="#ddd")
         self.cast_canvas.pack(fill="both", padx=6, pady=6)
@@ -144,10 +158,13 @@ class CastDetailPanel(ttk.Frame):
         self.var_show_delta.set(False)
         self.ma_samples = []
         self.cast_samples = []
+        self.cast_series_desc = []
         self.app._draw_ma_graph(self.ma_canvas, self.ma_samples)
         self.app._draw_ma_graph(self.cast_canvas, self.cast_samples)
         for child in self.summary_blocks.winfo_children():
             child.destroy()
+        self._update_summary_ma_display({})
+        self._update_cast_ma_display()
         self.delta_note.configure(text="")
         self.delta_toggle.state(["disabled"])
         self._clear_tree()
@@ -176,29 +193,16 @@ class CastDetailPanel(ttk.Frame):
             ("delta_avg_big_score", summary["delta_avg_big_score"]),
             ("delta_avg_big_score_per_day", summary["delta_avg_big_score_per_day"]),
         ])
-        self.app._build_summary_block(self.summary_blocks, "--- MA ---", [
-            ("ma3_samples_avg_big_score", summary["ma3_samples_avg_big_score"]),
-            ("ma14_samples_avg_big_score", summary["ma14_samples_avg_big_score"]),
-            ("ma28_samples_avg_big_score", summary["ma28_samples_avg_big_score"]),
-        ])
+        self.app._build_ma_summary_block(
+            self.summary_blocks,
+            self.var_summary_ma_labels,
+            self.var_summary_ma_values,
+            self.app.bd_ma_display_var,
+        )
 
-        days = self.app._list_daily_dates()
-        samples = []
-        if days:
-            for d in days:
-                if d > day:
-                    continue
-                snap_d = self.app._load_daily_snapshot(d)
-                if not snap_d:
-                    continue
-                bd_d, _, _ = self.app._get_bd_daily_summary(snap_d, d)
-                val = bd_d.get("avg_big_score") if isinstance(bd_d, dict) else None
-                if isinstance(val, (int, float)):
-                    samples.append((d, float(val)))
-            if len(samples) > 28:
-                samples = samples[-28:]
-        self.ma_samples = samples
+        self.ma_samples = self.app._get_avg_big_score_series(day)
         self.app._draw_ma_graph(self.ma_canvas, self.ma_samples)
+        self._update_summary_ma_display(summary)
 
         extra_keys = [
             "prev_seen_day",
@@ -435,21 +439,9 @@ class CastDetailPanel(ttk.Frame):
         series_desc = self.app._get_cast_score_series(gid, self.day)
         samples_used = len(series_desc)
 
-        def calc_ma(n):
-            if not series_desc:
-                return None
-            vals = [v for _, v in series_desc[:n] if isinstance(v, (int, float))]
-            if not vals:
-                return None
-            return sum(vals) / len(vals)
-
-        def fmt_ma(val):
-            return "N/A" if val is None else self.app._format_score_percent(val)
-
         self.var_cast_samples.set(str(samples_used))
-        self.var_cast_ma3.set(fmt_ma(calc_ma(3)))
-        self.var_cast_ma14.set(fmt_ma(calc_ma(14)))
-        self.var_cast_ma28.set(fmt_ma(calc_ma(28)))
+        self.cast_series_desc = series_desc
+        self._update_cast_ma_display()
 
         series = list(reversed(series_desc))
         self.cast_samples = series
@@ -461,6 +453,36 @@ class CastDetailPanel(ttk.Frame):
 
     def _on_toggle_ma(self):
         self._redraw_ma_graphs()
+
+    def _on_ma_display_change(self):
+        summary = self.app._get_bd_daily_summary(self.snap or {}, self.day or "")[2]
+        self._update_summary_ma_display(summary)
+        self._update_cast_ma_display()
+
+    def _update_summary_ma_display(self, summary):
+        self.app._update_ma_summary_values(
+            self.var_summary_ma_labels,
+            self.var_summary_ma_values,
+            summary,
+            self.ma_samples,
+            self.app.bd_ma_display_var.get(),
+        )
+
+    def _update_cast_ma_display(self):
+        window_values = self.app._get_display_windows(self.app.bd_ma_display_var.get())
+        cast_value_vars = [self.var_cast_ma3, self.var_cast_ma14, self.var_cast_ma28]
+        for idx, window in enumerate(window_values):
+            label = f"ma{window}_cast_big_score" if window else "ma--_cast_big_score"
+            self.var_cast_ma_labels[idx].set(label)
+            cast_value_vars[idx].set(self._calc_cast_ma_value(window))
+
+    def _calc_cast_ma_value(self, window):
+        if not window or not self.cast_series_desc or len(self.cast_series_desc) < window:
+            return "N/A"
+        vals = [v for _, v in self.cast_series_desc[:window] if isinstance(v, (int, float))]
+        if len(vals) < window:
+            return "N/A"
+        return self.app._format_score_percent(sum(vals) / window)
 
     def _redraw_ma_graphs(self):
         self.app._draw_ma_graph(self.ma_canvas, self.ma_samples)
@@ -521,6 +543,8 @@ class App(tk.Tk):
             84: tk.BooleanVar(value=False),
             112: tk.BooleanVar(value=False),
         }
+        self.bd_ma_display_var = tk.StringVar(value=str(self.bd_ma_windows[0]))
+        self._bd_summary_ma_trace_id = None
 
         self._build_ui()
         self._refresh_preset_combo()
@@ -2142,6 +2166,79 @@ class App(tk.Tk):
         frame.columnconfigure(1, weight=1)
         return frame
 
+    def _get_display_windows(self, window_value):
+        windows = list(self.bd_ma_windows)
+        try:
+            selected = int(window_value)
+        except Exception:
+            selected = windows[0]
+        if selected not in windows:
+            selected = windows[0]
+        start_idx = windows.index(selected)
+        display = windows[start_idx:start_idx + 3]
+        while len(display) < 3:
+            display.append(None)
+        return display
+
+    def _format_ma_summary_value(self, window, summary, samples):
+        if not window:
+            return "N/A"
+        key = f"ma{window}_samples_avg_big_score"
+        if window in (3, 14, 28) and key in summary:
+            return summary.get(key) or "N/A"
+        values = [v for _, v in samples]
+        ma_values = self._calc_moving_average(values, window)
+        if not ma_values:
+            return "N/A"
+        last_val = ma_values[-1]
+        if last_val is None:
+            return "N/A"
+        return self._format_bd_score(last_val)
+
+    def _update_ma_summary_values(self, label_vars, value_vars, summary, samples, window_value):
+        window_values = self._get_display_windows(window_value)
+        for idx, window in enumerate(window_values):
+            label = f"ma{window}_samples_avg_big_score" if window else "ma--_samples_avg_big_score"
+            label_vars[idx].set(label)
+            value_vars[idx].set(self._format_ma_summary_value(window, summary, samples))
+
+    def _build_ma_summary_block(self, parent, label_vars, value_vars, combo_var):
+        frame = ttk.LabelFrame(parent, text="--- MA ---")
+        frame.pack(side="left", fill="x", expand=True, padx=6, pady=4)
+        label_frame = ttk.Frame(frame)
+        label_frame.grid(row=0, column=0, sticky="w", padx=6, pady=2)
+        ttk.Label(label_frame, textvariable=label_vars[0]).pack(side="left")
+        combo = ttk.Combobox(
+            label_frame,
+            width=4,
+            state="readonly",
+            textvariable=combo_var,
+            values=[str(w) for w in self.bd_ma_windows],
+        )
+        combo.pack(side="left", padx=(4, 0))
+        for idx in range(1, 3):
+            ttk.Label(frame, textvariable=label_vars[idx]).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
+        for idx, value_var in enumerate(value_vars):
+            ttk.Label(frame, textvariable=value_var).grid(row=idx, column=1, sticky="w", padx=6, pady=2)
+        frame.columnconfigure(1, weight=1)
+        return frame
+
+    def _get_avg_big_score_series(self, upto_day):
+        days = self._list_daily_dates()
+        samples = []
+        if days:
+            for d in days:
+                if d > upto_day:
+                    continue
+                snap_d = self._load_daily_snapshot(d)
+                if not snap_d:
+                    continue
+                bd_d, _, _ = self._get_bd_daily_summary(snap_d, d)
+                val = bd_d.get("avg_big_score") if isinstance(bd_d, dict) else None
+                if isinstance(val, (int, float)):
+                    samples.append((d, float(val)))
+        return samples
+
     def _build_summary_panel(self, panel, bd, has_bd_daily, summary, day):
         for child in panel.winfo_children():
             child.destroy()
@@ -2161,11 +2258,31 @@ class App(tk.Tk):
             ("delta_avg_big_score", summary["delta_avg_big_score"]),
             ("delta_avg_big_score_per_day", summary["delta_avg_big_score_per_day"]),
         ])
-        self._build_summary_block(blocks, "--- MA ---", [
-            ("ma3_samples_avg_big_score", summary["ma3_samples_avg_big_score"]),
-            ("ma14_samples_avg_big_score", summary["ma14_samples_avg_big_score"]),
-            ("ma28_samples_avg_big_score", summary["ma28_samples_avg_big_score"]),
-        ])
+        ma_label_vars = [
+            tk.StringVar(value="ma3_samples_avg_big_score"),
+            tk.StringVar(value="ma14_samples_avg_big_score"),
+            tk.StringVar(value="ma28_samples_avg_big_score"),
+        ]
+        ma_value_vars = [
+            tk.StringVar(value="N/A"),
+            tk.StringVar(value="N/A"),
+            tk.StringVar(value="N/A"),
+        ]
+        self._build_ma_summary_block(blocks, ma_label_vars, ma_value_vars, self.bd_ma_display_var)
+        samples = self._get_avg_big_score_series(day)
+        self._update_ma_summary_values(ma_label_vars, ma_value_vars, summary, samples, self.bd_ma_display_var.get())
+        if self._bd_summary_ma_trace_id:
+            self.bd_ma_display_var.trace_remove("write", self._bd_summary_ma_trace_id)
+        self._bd_summary_ma_trace_id = self.bd_ma_display_var.trace_add(
+            "write",
+            lambda *_: self._update_ma_summary_values(
+                ma_label_vars,
+                ma_value_vars,
+                summary,
+                samples,
+                self.bd_ma_display_var.get(),
+            ),
+        )
 
     def _calc_moving_average(self, values, window):
         if window <= 0:
@@ -2259,8 +2376,6 @@ class App(tk.Tk):
                     break
                 if isinstance(val, (int, float)):
                     series.append((d, float(val)))
-                    if len(series) >= 28:
-                        break
         self.cache_gid_series[cache_key] = series
         return series
 
