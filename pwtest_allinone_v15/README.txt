@@ -54,12 +54,23 @@ pwtest (Playwright 自動取得ツール)
 ■ 自動実行の設定（config.json）
 score_data/config.json の auto.* を自動/手動の既定値として使います。
 例:
-{
-  "auto": {
-    "presets": "fortune,natural-swim,megapalace",
-    "headful": false,
-    "concurrency": 3,
+{
+  "auto": {
+    "presets": "fortune,natural-swim,megapalace",
+    "headful": false,
+    "concurrency": 3,
     "once_per_day": true,
+    "minimize_browser": false
+  },
+  "notify": { "enabled": true, "min_confidence": 50, "top_n": 5 },
+  "score": { "bell_sat": 18, "bd_day_sat": 14 },
+  "retention": { "months": 6, "max_lines": 200 }
+※ --force-today で once_per_day を無視して実行できます。
+※ score.bell_sat / score.bd_day_sat は Score/BD の飽和・日数係数を調整します。
+
+■ スコアロジック（v2）簡易確認
+scrape_core.py を直接実行して、Score/BD の簡易テストを表示できます。
+  python scrape_core.py --debug-score
     "minimize_browser": false
   },
   "notify": { "enabled": true, "min_confidence": 50, "top_n": 5 },
