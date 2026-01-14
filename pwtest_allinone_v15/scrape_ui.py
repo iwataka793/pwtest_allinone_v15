@@ -1618,6 +1618,11 @@ class App(tk.Tk):
             prev_stats = (prev.get("stats") if isinstance(prev, dict) else None) if prev else None
             r["prev_stats"] = prev_stats
             r["delta"] = calc_delta_popularity(prev_stats, r["stats"])
+            stats_by_date = None
+            if isinstance(r.get("stats"), dict):
+                stats_by_date = r["stats"].get("stats_by_date")
+            if isinstance(stats_by_date, dict):
+                r["stats_by_date"] = stats_by_date
 
             # 信頼度（サイト側評価：キャスト評価に加えない）
             diag = {
@@ -1645,7 +1650,12 @@ class App(tk.Tk):
                         hist_cache[gid] = hist
                 else:
                     hist = []
-                r["big_score"] = calc_bigdata_score(r.get("score",0), r.get("stats",{}), hist)
+                big_score, detail = _calc_bigdata_score_detail(r.get("stats", {}), hist, cur_stats_by_date=stats_by_date)
+                r["big_score"] = big_score
+                r["bd_level"] = detail.get("bd_level")
+                r["bd_trust"] = detail.get("bd_trust")
+                r["bd_days"] = detail.get("bd_days")
+                r["bd_model"] = _BD_MODEL_NAME
             except Exception:
                 r["big_score"] = r.get("score",0)
 
@@ -1664,6 +1674,11 @@ class App(tk.Tk):
                         "delta": r.get("delta"),
                         "site_confidence": r.get("site_confidence",0),
                         "stats": r.get("stats",{}),
+                        "stats_by_date": stats_by_date,
+                        "bd_model": r.get("bd_model"),
+                        "bd_level": r.get("bd_level"),
+                        "bd_trust": r.get("bd_trust"),
+                        "bd_days": r.get("bd_days"),
                     })
             except Exception as e:
                 self.log(f"[ERR] append_history failed gid={gid} err={e}\n")

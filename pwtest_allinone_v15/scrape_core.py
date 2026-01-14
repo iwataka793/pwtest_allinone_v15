@@ -1352,9 +1352,95 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
   }
   if (maxCols <= 0) return { ok:false, reason:"no cols" };
 
+  const firstDataRowIndex = rows.findIndex(r => dataRows.includes(r));
+  const headerRows = firstDataRowIndex > 0 ? rows.slice(0, firstDataRowIndex) : [];
+  const now = new Date();
+  function pad2(n) { return String(n).padStart(2, "0"); }
+  function findBaseYearMonth() {
+    let year = now.getFullYear();
+    let month = now.getMonth() + 1;
+    const bodyText = (document.body && document.body.innerText) ? document.body.innerText : "";
+    let m = bodyText.match(/(\d{4})\s*[年\/\.]\s*(\d{1,2})\s*月/);
+    if (m) {
+      year = parseInt(m[1], 10) || year;
+      month = parseInt(m[2], 10) || month;
+      return { year, month };
+    }
+    m = bodyText.match(/(\d{1,2})\s*月/);
+    if (m) {
+      month = parseInt(m[1], 10) || month;
+    }
+    return { year, month };
+  }
+  const baseYM = findBaseYearMonth();
+  function parseDateText(txt) {
+    if (!txt) return null;
+    const clean = String(txt).replace(/\s+/g, "");
+    let month = null;
+    let day = null;
+    let m = clean.match(/(\d{1,2})[\/\.](\d{1,2})/);
+    if (m) {
+      month = parseInt(m[1], 10);
+      day = parseInt(m[2], 10);
+    } else {
+      m = clean.match(/(\d{1,2})月(\d{1,2})/);
+      if (m) {
+        month = parseInt(m[1], 10);
+        day = parseInt(m[2], 10);
+      } else {
+        m = clean.match(/(\d{1,2})\([月火水木金土日]\)/);
+        if (m) {
+          day = parseInt(m[1], 10);
+        } else {
+          m = clean.match(/(\d{1,2})日/);
+          if (m) day = parseInt(m[1], 10);
+        }
+      }
+    }
+    if (!day || day < 1 || day > 31) return null;
+    if (!month || month < 1 || month > 12) month = baseYM.month;
+    if (!month) return null;
+    let year = baseYM.year;
+    if (baseYM.month === 12 && month === 1) year += 1;
+    if (baseYM.month === 1 && month === 12) year -= 1;
+    return `${year}-${pad2(month)}-${pad2(day)}`;
+  }
+  let headerRow = null;
+  let headerMatches = 0;
+  for (const r of headerRows) {
+    const cells = Array.from(r.children).filter(el => el.tagName === "TD" || el.tagName === "TH").slice(1);
+    let hits = 0;
+    for (const td of cells) {
+      if (parseDateText(td.innerText || "")) hits += 1;
+    }
+    if (hits > headerMatches) {
+      headerMatches = hits;
+      headerRow = r;
+    }
+  }
+  const columnDateKeys = Array(maxCols).fill(null);
+  if (headerRow && headerMatches > 0) {
+    const cells = Array.from(headerRow.children).filter(el => el.tagName === "TD" || el.tagName === "TH").slice(1);
+    let col = 0;
+    for (const td of cells) {
+      const cs = parseInt(td.getAttribute("colspan") || "1", 10) || 1;
+      const dateKey = parseDateText(td.innerText || "");
+      for (let cc = col; cc < Math.min(maxCols, col + cs); cc++) {
+        if (dateKey) columnDateKeys[cc] = dateKey;
+      }
+      col += cs;
+      if (col >= maxCols) break;
+    }
+  }
+
   const rowCount = dataRows.length;
   const grid = Array.from({ length: rowCount }, () => Array(maxCols).fill(null));
   const out = { ok:true, bell:0, maru:0, tel:0, dash:0, other:0, total_slots:0, bookable_slots:0, excluded_slots:0, time_rows: rowCount, max_cols: maxCols, td_count:0 };
+  const statsByDate = {};
+  function ensureDateKey(key) {
+    if (!statsByDate[key]) statsByDate[key] = { bell:0, maru:0, tel:0, other:0 };
+    return statsByDate[key];
+  }
 
   function classifyCell(td) {
     if (!td) return "other";
@@ -1400,11 +1486,25 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
     grid[r][c] = t;
     if (t === "excluded_notice_big") {
       out.excluded_slots += 1;
+      const dateKey = columnDateKeys[c];
+      if (dateKey) {
+        const dst = ensureDateKey(dateKey);
+        dst.other += 1;
+      }
       return;
     }
     out[t] = (out[t] || 0) + 1;
     out.total_slots += 1;
     if (t === "bell" || t === "maru" || t === "tel") out.bookable_slots += 1;
+    const dateKey = columnDateKeys[c];
+    if (dateKey) {
+      const dst = ensureDateKey(dateKey);
+      if (t === "bell" || t === "maru" || t === "tel") {
+        dst[t] += 1;
+      } else {
+        dst.other += 1;
+      }
+    }
   }
 
   for (let r = 0; r < rowCount; r++) {
@@ -1430,6 +1530,7 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
 
   out.bell_rate_total = out.total_slots ? (out.bell / out.total_slots) : null;
   out.bell_rate_bookable = out.bookable_slots ? (out.bell / out.bookable_slots) : null;
+  out.stats_by_date = statsByDate;
   return out;
 })()
 """)
@@ -1852,6 +1953,7 @@ def count_calendar_stats_by_slots(page, stop_evt: threading.Event, progress_cb=N
 # -------------------------
 _SCORE_PARAMS_CACHE = None
 _SCORE_MODEL_NAME = "v2_fill_evidence"
+_BD_MODEL_NAME = "v3_bd_by_service_date"
 
 def _get_score_params():
     global _SCORE_PARAMS_CACHE
@@ -1859,9 +1961,11 @@ def _get_score_params():
         cfg = load_config()
         score_cfg = cfg.get("score", {}) if isinstance(cfg, dict) else {}
         bell_sat = float(score_cfg.get("bell_sat", 18) or 18)
+        trust_day_sat = float(score_cfg.get("trust_day_sat", score_cfg.get("bd_day_sat", 18)) or 18)
         bd_day_sat = float(score_cfg.get("bd_day_sat", 14) or 14)
         _SCORE_PARAMS_CACHE = {
             "bell_sat": bell_sat if bell_sat > 0 else 18,
+            "trust_day_sat": trust_day_sat if trust_day_sat > 0 else 18,
             "bd_day_sat": bd_day_sat if bd_day_sat > 0 else 14,
         }
     return _SCORE_PARAMS_CACHE
@@ -2659,58 +2763,112 @@ def _percentile_of(value: float, arr):
             lo += 1
     return lo / max(1, len(s))
 
-def calc_bigdata_score(cur_score: float, cur_stats: dict, hist: list):
+def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict = None):
     """
     ビッグデータ版スコア（0.0〜1.0）
-    - 当日スコア(v2)の長期平均をベースに“本物度”を推定する
+    - サービス日(YYYY-MM-DD)ごとの“ユニーク日付系列”からMAを作る
+    - 同一サービス日が複数観測されても、最新の観測(<=サービス日)だけ採用
     - Confidence（サイト信頼度）は別軸なので、ここでは加点しない
     """
     params = _get_score_params()
     bell_sat = params.get("bell_sat", 18)
-    bd_day_sat = params.get("bd_day_sat", 14)
+    trust_day_sat = params.get("trust_day_sat", 18)
 
-    cur_score_v2 = score_v2(cur_stats, bell_sat=bell_sat)
+    def _parse_iso_date(val):
+        if not val:
+            return None
+        try:
+            return datetime.date.fromisoformat(str(val))
+        except Exception:
+            return None
 
-    def _day_key_from_hist(h):
+    def _obs_date_from_entry(h):
         if not isinstance(h, dict):
             return None
-        ts = h.get("ts") or h.get("run_ts") or h.get("date")
+        ts = h.get("ts") or h.get("run_ts") or h.get("date") or h.get("datetime") or h.get("time")
         if ts:
             dt = _parse_dt_any(ts)
             if dt:
-                return dt.date().isoformat()
+                return dt.date()
             m = re.match(r"^(\d{8})", str(ts))
             if m:
                 try:
                     dt = datetime.datetime.strptime(m.group(1), "%Y%m%d")
-                    return dt.date().isoformat()
+                    return dt.date()
                 except Exception:
                     pass
         return None
 
-    hist_scores_desc = []
-    seen_days = set()
-    today_key = datetime.date.today().isoformat()
-    seen_days.add(today_key)
-    unknown_count = 0
+    def _stats_by_date_from_entry(h):
+        if not isinstance(h, dict):
+            return None
+        sbd = h.get("stats_by_date")
+        if isinstance(sbd, dict):
+            return sbd
+        st = h.get("stats")
+        if isinstance(st, dict) and isinstance(st.get("stats_by_date"), dict):
+            return st.get("stats_by_date")
+        return None
+
+    def _update_best(best, service_date, obs_date, st):
+        if not service_date:
+            return
+        if obs_date and obs_date > service_date:
+            return
+        bell = int((st or {}).get("bell", 0) or 0)
+        maru = int((st or {}).get("maru", 0) or 0)
+        tel = int((st or {}).get("tel", 0) or 0)
+        if bell + maru + tel <= 0:
+            return
+        key = service_date.isoformat()
+        prev = best.get(key)
+        if not prev:
+            best[key] = {
+                "service_date": service_date,
+                "obs_date": obs_date,
+                "bell": bell,
+                "maru": maru,
+                "tel": tel,
+            }
+            return
+        prev_obs = prev.get("obs_date")
+        if prev_obs is None and obs_date is not None:
+            prev.update(obs_date=obs_date, bell=bell, maru=maru, tel=tel)
+            return
+        if obs_date is not None and prev_obs is not None and obs_date > prev_obs:
+            prev.update(obs_date=obs_date, bell=bell, maru=maru, tel=tel)
+
+    best = {}
+    today = datetime.date.today()
+    if isinstance(cur_stats_by_date, dict):
+        for dkey, st in cur_stats_by_date.items():
+            service_date = _parse_iso_date(dkey)
+            _update_best(best, service_date, today, st)
+    cur_stats_v2 = score_v2(cur_stats or {}, bell_sat=bell_sat)
+    if not best:
+        _update_best(best, today, today, cur_stats or {})
+
     for h in hist or []:
         if not isinstance(h, dict):
             continue
-        st = h.get("stats")
-        if not isinstance(st, dict):
-            continue
-        day_key = _day_key_from_hist(h)
-        if day_key:
-            if day_key in seen_days:
-                continue
-            seen_days.add(day_key)
+        obs_date = _obs_date_from_entry(h)
+        sbd = _stats_by_date_from_entry(h)
+        if isinstance(sbd, dict):
+            for dkey, st in sbd.items():
+                service_date = _parse_iso_date(dkey)
+                _update_best(best, service_date, obs_date, st)
         else:
-            unknown_count += 1
-            day_key = f"unknown_{unknown_count}"
-            seen_days.add(day_key)
-        hist_scores_desc.append(score_v2(st, bell_sat=bell_sat))
+            st = h.get("stats")
+            if isinstance(st, dict) and obs_date:
+                _update_best(best, obs_date, obs_date, st)
 
-    series_desc = [cur_score_v2] + hist_scores_desc
+    series = sorted(best.values(), key=lambda x: x.get("service_date") or today, reverse=True)
+    series_desc = [
+        score_v2({"bell": s.get("bell"), "maru": s.get("maru"), "tel": s.get("tel")}, bell_sat=bell_sat)
+        for s in series
+    ]
+    if not series_desc:
+        series_desc = [cur_stats_v2]
 
     def _ma(window):
         if not series_desc:
@@ -2719,26 +2877,54 @@ def calc_bigdata_score(cur_score: float, cur_stats: dict, hist: list):
         subset = series_desc[:min(w, len(series_desc))]
         return (sum(subset) / len(subset)) if subset else None
 
-    length = len(series_desc)
-    if length >= 84:
-        bd_base = _ma(84)
-    elif length >= 56:
-        bd_base = _ma(56)
-    elif length >= 14:
-        bd_base = _ma(14)
-    elif length >= 3:
-        bd_base = _ma(3)
-    else:
-        bd_base = cur_score_v2
+    n = len(series_desc)
+    ma3 = _ma(3)
+    ma14 = _ma(14)
+    ma28 = _ma(28)
+    ma56 = _ma(56)
+    ma84 = _ma(84)
+    ma112 = _ma(112)
 
-    days = len(seen_days)
-    if bd_day_sat <= 0:
-        day_factor = 1.0
+    if n >= 112:
+        level = ma112
+    elif n >= 84:
+        level = ma84
+    elif n >= 56:
+        level = ma56
+    elif n >= 28:
+        level = ma28
+    elif n >= 14:
+        level = ma14
+    elif n >= 3:
+        level = ma3
     else:
-        day_factor = 1.0 - math.exp(-days / float(bd_day_sat))
+        level = series_desc[0] if series_desc else 0.0
 
-    base = float(bd_base or 0.0)
-    return _clamp01(base * day_factor)
+    if trust_day_sat <= 0:
+        trust = 1.0
+    else:
+        trust = 1.0 - math.exp(-n / float(trust_day_sat))
+
+    base = float(level or 0.0)
+    big_score = _clamp01(base * trust)
+    detail = {
+        "big_score": big_score,
+        "bd_level": base,
+        "bd_trust": trust,
+        "bd_days": n,
+        "ma3": ma3,
+        "ma14": ma14,
+        "ma28": ma28,
+        "ma56": ma56,
+        "ma84": ma84,
+        "ma112": ma112,
+        "unique_dates": [s.get("service_date").isoformat() for s in series if s.get("service_date")],
+    }
+    return big_score, detail
+
+def calc_bigdata_score(cur_score: float, cur_stats: dict, hist: list, cur_stats_by_date: dict = None):
+    _, detail = _calc_bigdata_score_detail(cur_stats, hist, cur_stats_by_date=cur_stats_by_date)
+    return detail.get("big_score", 0.0)
 
 def build_analytics(all_rows: list, run_ts: str, run_dir: str):
     """
@@ -2953,7 +3139,8 @@ def load_config():
         },
         "score": {
             "bell_sat": 18,
-            "bd_day_sat": 14
+            "bd_day_sat": 14,
+            "trust_day_sat": 18
         },
         "retention": {
             "months": 6,
@@ -3550,9 +3737,95 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
   }
   if (maxCols <= 0) return { ok:false, reason:"no cols" };
 
+  const firstDataRowIndex = rows.findIndex(r => dataRows.includes(r));
+  const headerRows = firstDataRowIndex > 0 ? rows.slice(0, firstDataRowIndex) : [];
+  const now = new Date();
+  function pad2(n) { return String(n).padStart(2, "0"); }
+  function findBaseYearMonth() {
+    let year = now.getFullYear();
+    let month = now.getMonth() + 1;
+    const bodyText = (document.body && document.body.innerText) ? document.body.innerText : "";
+    let m = bodyText.match(/(\d{4})\s*[年\/\.]\s*(\d{1,2})\s*月/);
+    if (m) {
+      year = parseInt(m[1], 10) || year;
+      month = parseInt(m[2], 10) || month;
+      return { year, month };
+    }
+    m = bodyText.match(/(\d{1,2})\s*月/);
+    if (m) {
+      month = parseInt(m[1], 10) || month;
+    }
+    return { year, month };
+  }
+  const baseYM = findBaseYearMonth();
+  function parseDateText(txt) {
+    if (!txt) return null;
+    const clean = String(txt).replace(/\s+/g, "");
+    let month = null;
+    let day = null;
+    let m = clean.match(/(\d{1,2})[\/\.](\d{1,2})/);
+    if (m) {
+      month = parseInt(m[1], 10);
+      day = parseInt(m[2], 10);
+    } else {
+      m = clean.match(/(\d{1,2})月(\d{1,2})/);
+      if (m) {
+        month = parseInt(m[1], 10);
+        day = parseInt(m[2], 10);
+      } else {
+        m = clean.match(/(\d{1,2})\([月火水木金土日]\)/);
+        if (m) {
+          day = parseInt(m[1], 10);
+        } else {
+          m = clean.match(/(\d{1,2})日/);
+          if (m) day = parseInt(m[1], 10);
+        }
+      }
+    }
+    if (!day || day < 1 || day > 31) return null;
+    if (!month || month < 1 || month > 12) month = baseYM.month;
+    if (!month) return null;
+    let year = baseYM.year;
+    if (baseYM.month === 12 && month === 1) year += 1;
+    if (baseYM.month === 1 && month === 12) year -= 1;
+    return `${year}-${pad2(month)}-${pad2(day)}`;
+  }
+  let headerRow = null;
+  let headerMatches = 0;
+  for (const r of headerRows) {
+    const cells = Array.from(r.children).filter(el => el.tagName === "TD" || el.tagName === "TH").slice(1);
+    let hits = 0;
+    for (const td of cells) {
+      if (parseDateText(td.innerText || "")) hits += 1;
+    }
+    if (hits > headerMatches) {
+      headerMatches = hits;
+      headerRow = r;
+    }
+  }
+  const columnDateKeys = Array(maxCols).fill(null);
+  if (headerRow && headerMatches > 0) {
+    const cells = Array.from(headerRow.children).filter(el => el.tagName === "TD" || el.tagName === "TH").slice(1);
+    let col = 0;
+    for (const td of cells) {
+      const cs = parseInt(td.getAttribute("colspan") || "1", 10) || 1;
+      const dateKey = parseDateText(td.innerText || "");
+      for (let cc = col; cc < Math.min(maxCols, col + cs); cc++) {
+        if (dateKey) columnDateKeys[cc] = dateKey;
+      }
+      col += cs;
+      if (col >= maxCols) break;
+    }
+  }
+
   const rowCount = dataRows.length;
   const grid = Array.from({ length: rowCount }, () => Array(maxCols).fill(null));
   const out = { ok:true, bell:0, maru:0, tel:0, dash:0, other:0, total_slots:0, bookable_slots:0, excluded_slots:0, time_rows:rowCount, max_cols:maxCols, td_count:0, symbols:{} };
+  const statsByDate = {};
+  function ensureDateKey(key) {
+    if (!statsByDate[key]) statsByDate[key] = { bell:0, maru:0, tel:0, other:0 };
+    return statsByDate[key];
+  }
 
   function cellType(td){
     const rawTxt = (td.innerText || "").trim();
@@ -3594,11 +3867,25 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
     grid[r][c] = t;
     if (t === "excluded_notice_big") {
       out.excluded_slots += 1;
+      const dateKey = columnDateKeys[c];
+      if (dateKey) {
+        const dst = ensureDateKey(dateKey);
+        dst.other += 1;
+      }
       return;
     }
     out[t] = (out[t] || 0) + 1;
     out.total_slots += 1;
     if (t === "bell" || t === "maru" || t === "tel") out.bookable_slots += 1;
+    const dateKey = columnDateKeys[c];
+    if (dateKey) {
+      const dst = ensureDateKey(dateKey);
+      if (t === "bell" || t === "maru" || t === "tel") {
+        dst[t] += 1;
+      } else {
+        dst.other += 1;
+      }
+    }
   }
 
   for (let r = 0; r < rowCount; r++) {
@@ -3632,6 +3919,7 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
   out.other_ratio = denom > 0 ? (out.other / denom) : null;
   out.bell_rate_total = out.total_slots ? (out.bell / out.total_slots) : null;
   out.bell_rate_bookable = out.bookable_slots ? (out.bell / out.bookable_slots) : null;
+  out.stats_by_date = statsByDate;
 
   return out;
 })()
@@ -4412,6 +4700,13 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
     for r in collected_rows:
         gid = r.get("gid","")
         stats = r.get("stats", {}) or {}
+        stats_by_date = None
+        if isinstance(stats, dict):
+            stats_by_date = stats.get("stats_by_date")
+        if not isinstance(stats_by_date, dict):
+            stats_by_date = r.get("stats_by_date") if isinstance(r.get("stats_by_date"), dict) else None
+        if isinstance(stats_by_date, dict):
+            r["stats_by_date"] = stats_by_date
 
         prev = load_state_snapshot(gid) if gid else None
         prev_stats = (prev.get("stats") if isinstance(prev, dict) else None) if prev else None
@@ -4446,7 +4741,12 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     hist_cache[gid] = hist
             else:
                 hist = []
-            r["big_score"] = calc_bigdata_score(r.get("score",0), stats, hist)
+            big_score, detail = _calc_bigdata_score_detail(stats, hist, cur_stats_by_date=stats_by_date)
+            r["big_score"] = big_score
+            r["bd_level"] = detail.get("bd_level")
+            r["bd_trust"] = detail.get("bd_trust")
+            r["bd_days"] = detail.get("bd_days")
+            r["bd_model"] = _BD_MODEL_NAME
         except Exception as e:
             r["big_score"] = r.get("score",0)
             log_event("WARN", "calc_bigdata_score failed", preset=job.name, gid=gid, err=str(e)[:200])
@@ -4462,9 +4762,14 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "score": r.get("score",0),
                     "big_score": r.get("big_score", r.get("score",0)),
                     "score_model": _SCORE_MODEL_NAME,
+                    "bd_model": r.get("bd_model"),
+                    "bd_level": r.get("bd_level"),
+                    "bd_trust": r.get("bd_trust"),
+                    "bd_days": r.get("bd_days"),
                     "spike": r.get("spike"),
                     "site_confidence": r.get("site_confidence", 0),
-                    "stats": stats
+                    "stats": stats,
+                    "stats_by_date": stats_by_date,
                 })
             except Exception as e:
                 log_event("ERR", "append_history failed", preset=job.name, gid=gid, err=str(e)[:200])
@@ -4688,7 +4993,7 @@ async def run_auto_once(preset_names=None, headless=True, minimize_browser=True,
 def _debug_score_print():
     params = _get_score_params()
     bell_sat = params.get("bell_sat", 18)
-    bd_day_sat = params.get("bd_day_sat", 14)
+    trust_day_sat = params.get("trust_day_sat", 18)
 
     def _score_of(bell, maru, tel):
         return score_v2({"bell": bell, "maru": maru, "tel": tel}, bell_sat=bell_sat)
@@ -4698,17 +5003,17 @@ def _debug_score_print():
     score_c = _score_of(40, 40, 0)
 
     def _bd_for_days(days, base_score=0.9):
-        if bd_day_sat <= 0:
+        if trust_day_sat <= 0:
             day_factor = 1.0
         else:
-            day_factor = 1.0 - math.exp(-days / float(bd_day_sat))
+            day_factor = 1.0 - math.exp(-days / float(trust_day_sat))
         return _clamp01(base_score * day_factor)
 
     bd3 = _bd_for_days(3)
     bd14 = _bd_for_days(14)
     bd56 = _bd_for_days(56)
 
-    print("[debug-score] params:", f"bell_sat={bell_sat}", f"bd_day_sat={bd_day_sat}")
+    print("[debug-score] params:", f"bell_sat={bell_sat}", f"trust_day_sat={trust_day_sat}")
     print("[debug-score] A bell=40 maru=0 tel=0 ->", f"{score_a:.6f}")
     print("[debug-score] B bell=39 maru=0 tel=0 ->", f"{score_b:.6f}")
     print("[debug-score] C bell=40 maru=40 tel=0 ->", f"{score_c:.6f}")
@@ -4716,9 +5021,39 @@ def _debug_score_print():
     print("[debug-score] BD score=0.9 for days=14 ->", f"{bd14:.6f}")
     print("[debug-score] BD score=0.9 for days=56 ->", f"{bd56:.6f}")
 
+def _debug_bd_print():
+    today = datetime.date.today()
+    hist = [
+        {
+            "ts": (today - datetime.timedelta(days=2)).strftime("%Y%m%d_090000"),
+            "stats_by_date": {
+                (today + datetime.timedelta(days=1)).isoformat(): {"bell": 6, "maru": 4, "tel": 0},
+                (today + datetime.timedelta(days=2)).isoformat(): {"bell": 5, "maru": 5, "tel": 0},
+            },
+        },
+        {
+            "ts": (today - datetime.timedelta(days=1)).strftime("%Y%m%d_090000"),
+            "stats_by_date": {
+                (today + datetime.timedelta(days=1)).isoformat(): {"bell": 8, "maru": 2, "tel": 0},
+                (today + datetime.timedelta(days=3)).isoformat(): {"bell": 4, "maru": 6, "tel": 0},
+            },
+        },
+    ]
+    cur_stats_by_date = {
+        (today + datetime.timedelta(days=1)).isoformat(): {"bell": 9, "maru": 1, "tel": 0},
+        (today + datetime.timedelta(days=4)).isoformat(): {"bell": 3, "maru": 7, "tel": 0},
+    }
+    _, detail = _calc_bigdata_score_detail({"bell": 9, "maru": 1, "tel": 0}, hist, cur_stats_by_date=cur_stats_by_date)
+    print("[debug-bd] unique_dates:", detail.get("unique_dates"))
+    print("[debug-bd] days:", detail.get("bd_days"), "level:", f"{detail.get('bd_level', 0):.6f}", "trust:", f"{detail.get('bd_trust', 0):.6f}", "big_score:", f"{detail.get('big_score', 0):.6f}")
+    print("[debug-bd] ma28/ma56/ma84/ma112:", f"{detail.get('ma28')}", f"{detail.get('ma56')}", f"{detail.get('ma84')}", f"{detail.get('ma112')}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug-score", action="store_true", help="print score/bd debug samples")
+    parser.add_argument("--debug-bd", action="store_true", help="print BD unique-date debug samples")
     args = parser.parse_args()
     if args.debug_score:
         _debug_score_print()
+    if args.debug_bd:
+        _debug_bd_print()
