@@ -2839,7 +2839,9 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
             prev.update(obs_date=obs_date, bell=bell, maru=maru, tel=tel)
 
     best = {}
+    obs_dates = set()
     today = datetime.date.today()
+    obs_dates.add(today)
     if isinstance(cur_stats_by_date, dict):
         for dkey, st in cur_stats_by_date.items():
             service_date = _parse_iso_date(dkey)
@@ -2852,6 +2854,8 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
         if not isinstance(h, dict):
             continue
         obs_date = _obs_date_from_entry(h)
+        if obs_date:
+            obs_dates.add(obs_date)
         sbd = _stats_by_date_from_entry(h)
         if isinstance(sbd, dict):
             for dkey, st in sbd.items():
@@ -2877,7 +2881,8 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
         subset = series_desc[:min(w, len(series_desc))]
         return (sum(subset) / len(subset)) if subset else None
 
-    n = len(series_desc)
+    n_service = len(series) if series else len(series_desc)
+    n_obs = len(obs_dates)
     ma3 = _ma(3)
     ma14 = _ma(14)
     ma28 = _ma(28)
@@ -2885,25 +2890,32 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
     ma84 = _ma(84)
     ma112 = _ma(112)
 
-    if n >= 112:
+    bd_window = None
+    if n_service >= 112:
         level = ma112
-    elif n >= 84:
+        bd_window = 112
+    elif n_service >= 84:
         level = ma84
-    elif n >= 56:
+        bd_window = 84
+    elif n_service >= 56:
         level = ma56
-    elif n >= 28:
+        bd_window = 56
+    elif n_service >= 28:
         level = ma28
-    elif n >= 14:
+        bd_window = 28
+    elif n_service >= 14:
         level = ma14
-    elif n >= 3:
+        bd_window = 14
+    elif n_service >= 3:
         level = ma3
+        bd_window = 3
     else:
         level = series_desc[0] if series_desc else 0.0
 
     if trust_day_sat <= 0:
         trust = 1.0
     else:
-        trust = 1.0 - math.exp(-n / float(trust_day_sat))
+        trust = 1.0 - math.exp(-n_obs / float(trust_day_sat))
 
     base = float(level or 0.0)
     big_score = _clamp01(base * trust)
@@ -2911,7 +2923,10 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
         "big_score": big_score,
         "bd_level": base,
         "bd_trust": trust,
-        "bd_days": n,
+        "bd_days": n_service,
+        "bd_window": bd_window,
+        "bd_service_days": n_service,
+        "bd_obs_days": n_obs,
         "ma3": ma3,
         "ma14": ma14,
         "ma28": ma28,
@@ -4746,6 +4761,9 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
             r["bd_level"] = detail.get("bd_level")
             r["bd_trust"] = detail.get("bd_trust")
             r["bd_days"] = detail.get("bd_days")
+            r["bd_window"] = detail.get("bd_window")
+            r["bd_service_days"] = detail.get("bd_service_days")
+            r["bd_obs_days"] = detail.get("bd_obs_days")
             r["bd_model"] = _BD_MODEL_NAME
         except Exception as e:
             r["big_score"] = r.get("score",0)
@@ -4766,6 +4784,9 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "bd_level": r.get("bd_level"),
                     "bd_trust": r.get("bd_trust"),
                     "bd_days": r.get("bd_days"),
+                    "bd_window": r.get("bd_window"),
+                    "bd_service_days": r.get("bd_service_days"),
+                    "bd_obs_days": r.get("bd_obs_days"),
                     "spike": r.get("spike"),
                     "site_confidence": r.get("site_confidence", 0),
                     "stats": stats,
@@ -4781,7 +4802,11 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "gid": gid,
                     "name": r.get("name",""),
                     "preset": job.name,
-                    "stats": stats
+                    "stats": stats,
+                    "stats_by_date": stats_by_date,
+                    "score": r.get("score"),
+                    "big_score": r.get("big_score"),
+                    "bd_window": r.get("bd_window"),
                 })
             except Exception as e:
                 log_event("ERR", "save_state_snapshot failed", preset=job.name, gid=gid, err=str(e)[:200])
@@ -5045,7 +5070,8 @@ def _debug_bd_print():
     }
     _, detail = _calc_bigdata_score_detail({"bell": 9, "maru": 1, "tel": 0}, hist, cur_stats_by_date=cur_stats_by_date)
     print("[debug-bd] unique_dates:", detail.get("unique_dates"))
-    print("[debug-bd] days:", detail.get("bd_days"), "level:", f"{detail.get('bd_level', 0):.6f}", "trust:", f"{detail.get('bd_trust', 0):.6f}", "big_score:", f"{detail.get('big_score', 0):.6f}")
+    print("[debug-bd] days:", detail.get("bd_days"), "window:", detail.get("bd_window"), "service_days:", detail.get("bd_service_days"), "obs_days:", detail.get("bd_obs_days"))
+    print("[debug-bd] level:", f"{detail.get('bd_level', 0):.6f}", "trust:", f"{detail.get('bd_trust', 0):.6f}", "big_score:", f"{detail.get('big_score', 0):.6f}")
     print("[debug-bd] ma28/ma56/ma84/ma112:", f"{detail.get('ma28')}", f"{detail.get('ma56')}", f"{detail.get('ma84')}", f"{detail.get('ma112')}")
 
 if __name__ == "__main__":
