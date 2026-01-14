@@ -2178,6 +2178,9 @@ class App(tk.Tk):
             "ma3_samples_avg_big_score": self._format_bd_score(bd.get("ma3_samples_avg_big_score")),
             "ma14_samples_avg_big_score": self._format_bd_score(bd.get("ma14_samples_avg_big_score")),
             "ma28_samples_avg_big_score": self._format_bd_score(bd.get("ma28_samples_avg_big_score")),
+            "ma56_samples_avg_big_score": self._format_bd_score(bd.get("ma56_samples_avg_big_score")),
+            "ma84_samples_avg_big_score": self._format_bd_score(bd.get("ma84_samples_avg_big_score")),
+            "ma112_samples_avg_big_score": self._format_bd_score(bd.get("ma112_samples_avg_big_score")),
         }
         return bd, has_bd_daily, summary
 
@@ -2199,8 +2202,10 @@ class App(tk.Tk):
         if not window:
             return "N/A"
         key = f"ma{window}_samples_avg_big_score"
-        if window in (3, 14, 28) and key in summary:
-            return summary.get(key) or "N/A"
+        if key in summary:
+            val = summary.get(key)
+            if val not in (None, ""):
+                return val
         values = [v for _, v in samples]
         ma_values = self._calc_moving_average(values, window)
         if not ma_values:

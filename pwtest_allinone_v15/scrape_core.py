@@ -1,4 +1,4 @@
-import re, sys, json, time, threading, webbrowser, os, shutil
+import re, sys, json, time, threading, webbrowser, os, shutil, math
 import datetime
 import calendar
 from collections import deque
@@ -1850,6 +1850,40 @@ def count_calendar_stats_by_slots(page, stop_evt: threading.Event, progress_cb=N
 # -------------------------
 # スコア（率×ベル数×母数ペナルティ）
 # -------------------------
+_SCORE_PARAMS_CACHE = None
+_SCORE_MODEL_NAME = "v2_fill_evidence"
+
+def _get_score_params():
+    global _SCORE_PARAMS_CACHE
+    if _SCORE_PARAMS_CACHE is None:
+        cfg = load_config()
+        score_cfg = cfg.get("score", {}) if isinstance(cfg, dict) else {}
+        bell_sat = float(score_cfg.get("bell_sat", 18) or 18)
+        bd_day_sat = float(score_cfg.get("bd_day_sat", 14) or 14)
+        _SCORE_PARAMS_CACHE = {
+            "bell_sat": bell_sat if bell_sat > 0 else 18,
+            "bd_day_sat": bd_day_sat if bd_day_sat > 0 else 14,
+        }
+    return _SCORE_PARAMS_CACHE
+
+def _clamp01(value: float) -> float:
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+def score_v2(stats: dict, bell_sat: float = None) -> float:
+    bell = int((stats or {}).get("bell", 0) or 0)
+    maru = int((stats or {}).get("maru", 0) or 0)
+    tel = int((stats or {}).get("tel", 0) or 0)
+    denom = bell + maru + tel
+    fill = (bell / denom) if denom > 0 else 0.0
+    if bell_sat is None:
+        bell_sat = _get_score_params().get("bell_sat", 18)
+    bell_strength = 1.0 - math.exp(-bell / float(bell_sat)) if bell_sat > 0 else 0.0
+    return _clamp01(fill * bell_strength)
+
 def calc_score(stats, max_bell_in_batch: int):
     """
     キャスト人気スコア（0.0〜1.0）
@@ -1857,21 +1891,9 @@ def calc_score(stats, max_bell_in_batch: int):
     ※ TEL は予約手段が電話なだけで空き扱い（○と同等）。
     ※ このスコアにはサイト側の信頼度(Confidence)は一切加算しない（別軸）。
     """
-    bell = int(stats.get("bell", 0) or 0)
-    maru = int(stats.get("maru", 0) or 0)
-    tel  = int(stats.get("tel", 0) or 0)
-    bookable = maru + tel
-
-    denom = bell + bookable
-    pop_rate = (bell / denom) if denom > 0 else 0.0                         # 0..1
-    bell_norm = (bell / max_bell_in_batch) if max_bell_in_batch > 0 else 0.0 # 0..1
-    scarcity = 1.0 - min(1.0, bookable / 20.0)                              # 0..1（空きが少ないほど↑）
-
-    score = (0.60 * pop_rate + 0.30 * bell_norm + 0.10 * scarcity)
-
-    if score < 0.0: score = 0.0
-    if score > 1.0: score = 1.0
-    return score
+    _ = max_bell_in_batch  # v2では未使用（相対最大×は使わない）
+    params = _get_score_params()
+    return score_v2(stats, bell_sat=params.get("bell_sat", 18))
 
 def calc_delta_popularity(prev_stats, cur_stats):
     """
@@ -2478,7 +2500,7 @@ def update_daily_snapshot(all_rows: list, run_dir: str, run_ts: str, force_today
             avg_sample = _calc_avg_big_score(psnap.get("all_current", []) or [])
         if isinstance(avg_sample, (int, float)):
             ma_samples.append(float(avg_sample))
-        if len(ma_samples) >= 28:
+        if len(ma_samples) >= 112:
             break
 
     if prev_day:
@@ -2502,7 +2524,7 @@ def update_daily_snapshot(all_rows: list, run_dir: str, run_ts: str, force_today
         if isinstance(gap_days, int) and gap_days >= 1:
             delta_avg_big_score_per_day = delta_avg_big_score / gap_days
 
-    ma3 = ma14 = ma28 = None
+    ma3 = ma14 = ma28 = ma56 = ma84 = ma112 = None
     samples = []
     if isinstance(avg_big_score, (int, float)):
         samples.append(float(avg_big_score))
@@ -2511,6 +2533,9 @@ def update_daily_snapshot(all_rows: list, run_dir: str, run_ts: str, force_today
         ma3 = sum(samples[:3]) / len(samples[:3])
         ma14 = sum(samples[:14]) / len(samples[:14])
         ma28 = sum(samples[:28]) / len(samples[:28])
+        ma56 = sum(samples[:56]) / len(samples[:56])
+        ma84 = sum(samples[:84]) / len(samples[:84])
+        ma112 = sum(samples[:112]) / len(samples[:112])
 
     prev_rows_map = {}
     if prev_snapshot and isinstance(prev_snapshot, dict):
@@ -2553,18 +2578,22 @@ def update_daily_snapshot(all_rows: list, run_dir: str, run_ts: str, force_today
         "ma3_samples_avg_big_score": ma3,
         "ma14_samples_avg_big_score": ma14,
         "ma28_samples_avg_big_score": ma28,
+        "ma56_samples_avg_big_score": ma56,
+        "ma84_samples_avg_big_score": ma84,
+        "ma112_samples_avg_big_score": ma112,
     }
 
     if _detail_log_enabled():
         log_event("INFO", "bd", today=today, prev_day=prev_day, gap_days=gap_days)
         log_event("INFO", "bd", avg_big_score=avg_big_score, prev_avg=prev_avg_big_score, delta=delta_avg_big_score, per_day=delta_avg_big_score_per_day)
-        log_event("INFO", "bd", ma3=ma3, ma14=ma14, ma28=ma28)
+        log_event("INFO", "bd", ma3=ma3, ma14=ma14, ma28=ma28, ma56=ma56, ma84=ma84, ma112=ma112)
 
     daily = {
         "date": today,
         "run_ts": run_ts,
         "run_dir": os.path.basename(run_dir),
         "rows": len(all_rows),
+        "score_model": _SCORE_MODEL_NAME,
         "all_current": all_rows,
         "bd_daily": bd_daily,
     }
@@ -2633,56 +2662,83 @@ def _percentile_of(value: float, arr):
 def calc_bigdata_score(cur_score: float, cur_stats: dict, hist: list):
     """
     ビッグデータ版スコア（0.0〜1.0）
-    - 既存Score（瞬間）をベースに、過去平均との差/順位/トレンドを少し混ぜて“安定化”する
+    - 当日スコア(v2)の長期平均をベースに“本物度”を推定する
     - Confidence（サイト信頼度）は別軸なので、ここでは加点しない
     """
-    # 履歴が薄い場合は既存スコアを返す
-    if not hist or len(hist) < 3:
-        return cur_score
+    params = _get_score_params()
+    bell_sat = params.get("bell_sat", 18)
+    bd_day_sat = params.get("bd_day_sat", 14)
 
-    def rate_from(st):
-        bell = int((st or {}).get("bell", 0) or 0)
-        maru = int((st or {}).get("maru", 0) or 0)
-        tel  = int((st or {}).get("tel", 0) or 0)
-        denom = bell + maru + tel
-        return (bell / denom) if denom > 0 else 0.0
+    cur_score_v2 = score_v2(cur_stats, bell_sat=bell_sat)
 
-    cur_rate = rate_from(cur_stats)
-    hist_rates = []
-    for h in hist:
-        st = h.get("stats") if isinstance(h, dict) else None
+    def _day_key_from_hist(h):
+        if not isinstance(h, dict):
+            return None
+        ts = h.get("ts") or h.get("run_ts") or h.get("date")
+        if ts:
+            dt = _parse_dt_any(ts)
+            if dt:
+                return dt.date().isoformat()
+            m = re.match(r"^(\d{8})", str(ts))
+            if m:
+                try:
+                    dt = datetime.datetime.strptime(m.group(1), "%Y%m%d")
+                    return dt.date().isoformat()
+                except Exception:
+                    pass
+        return None
+
+    hist_scores_desc = []
+    seen_days = set()
+    today_key = datetime.date.today().isoformat()
+    seen_days.add(today_key)
+    unknown_count = 0
+    for h in hist or []:
+        if not isinstance(h, dict):
+            continue
+        st = h.get("stats")
         if not isinstance(st, dict):
             continue
-        hist_rates.append(rate_from(st))
+        day_key = _day_key_from_hist(h)
+        if day_key:
+            if day_key in seen_days:
+                continue
+            seen_days.add(day_key)
+        else:
+            unknown_count += 1
+            day_key = f"unknown_{unknown_count}"
+            seen_days.add(day_key)
+        hist_scores_desc.append(score_v2(st, bell_sat=bell_sat))
 
-    # 自分の過去の中での順位（0..1）
-    p_self = _percentile_of(cur_rate, hist_rates)
+    series_desc = [cur_score_v2] + hist_scores_desc
 
-    # 直近トレンド（最近が上がっている＝人気上昇方向）
-    # ※ “ベル率”が上がる＝予約が埋まる＝人気↑ の前提
-    trend = 0.0
-    try:
-        k = min(10, len(hist_rates))
-        recent = list(reversed(hist_rates[:k]))  # 古→新
-        if len(recent) >= 4:
-            first = sum(recent[:len(recent)//2]) / (len(recent)//2)
-            last  = sum(recent[len(recent)//2:]) / (len(recent)-len(recent)//2)
-            trend = (last - first)  # -1..+1くらい
-            # ざっくり正規化
-            if trend > 0.15: trend = 0.15
-            if trend < -0.15: trend = -0.15
-            trend = (trend / 0.15)  # -1..+1
-    except Exception:
-        trend = 0.0
+    def _ma(window):
+        if not series_desc:
+            return None
+        w = max(1, int(window))
+        subset = series_desc[:min(w, len(series_desc))]
+        return (sum(subset) / len(subset)) if subset else None
 
-    # 合成：瞬間(Score) + 過去順位 + トレンド
-    # ※重くしすぎない（Score主体）
-    if p_self is None:
-        p_self = 0.5
-    big = (0.65 * float(cur_score or 0.0)) + (0.25 * float(p_self)) + (0.10 * ((trend + 1.0) / 2.0))
-    if big < 0.0: big = 0.0
-    if big > 1.0: big = 1.0
-    return big
+    length = len(series_desc)
+    if length >= 84:
+        bd_base = _ma(84)
+    elif length >= 56:
+        bd_base = _ma(56)
+    elif length >= 14:
+        bd_base = _ma(14)
+    elif length >= 3:
+        bd_base = _ma(3)
+    else:
+        bd_base = cur_score_v2
+
+    days = len(seen_days)
+    if bd_day_sat <= 0:
+        day_factor = 1.0
+    else:
+        day_factor = 1.0 - math.exp(-days / float(bd_day_sat))
+
+    base = float(bd_base or 0.0)
+    return _clamp01(base * day_factor)
 
 def build_analytics(all_rows: list, run_ts: str, run_dir: str):
     """
@@ -2894,6 +2950,10 @@ def load_config():
             "enabled": True,
             "min_confidence": 50,
             "top_n": 5
+        },
+        "score": {
+            "bell_sat": 18,
+            "bd_day_sat": 14
         },
         "retention": {
             "months": 6,
@@ -4375,6 +4435,7 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
         r["site_issues"] = issues
 
         r["score"] = calc_score(stats, max_bell)
+        r["score_model"] = _SCORE_MODEL_NAME
 
         try:
             if gid:
@@ -4389,6 +4450,7 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
         except Exception as e:
             r["big_score"] = r.get("score",0)
             log_event("WARN", "calc_bigdata_score failed", preset=job.name, gid=gid, err=str(e)[:200])
+        r["spike"] = r.get("score", 0) - r.get("big_score", r.get("score", 0))
 
         if gid:
             try:
@@ -4399,6 +4461,8 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "name": r.get("name",""),
                     "score": r.get("score",0),
                     "big_score": r.get("big_score", r.get("score",0)),
+                    "score_model": _SCORE_MODEL_NAME,
+                    "spike": r.get("spike"),
                     "site_confidence": r.get("site_confidence", 0),
                     "stats": stats
                 })
@@ -4620,3 +4684,41 @@ async def run_auto_once(preset_names=None, headless=True, minimize_browser=True,
 
     log_event("INFO", "auto done", rows=len(all_rows), run_dir=os.path.basename(run_dir))
     return run_dir
+
+def _debug_score_print():
+    params = _get_score_params()
+    bell_sat = params.get("bell_sat", 18)
+    bd_day_sat = params.get("bd_day_sat", 14)
+
+    def _score_of(bell, maru, tel):
+        return score_v2({"bell": bell, "maru": maru, "tel": tel}, bell_sat=bell_sat)
+
+    score_a = _score_of(40, 0, 0)
+    score_b = _score_of(39, 0, 0)
+    score_c = _score_of(40, 40, 0)
+
+    def _bd_for_days(days, base_score=0.9):
+        if bd_day_sat <= 0:
+            day_factor = 1.0
+        else:
+            day_factor = 1.0 - math.exp(-days / float(bd_day_sat))
+        return _clamp01(base_score * day_factor)
+
+    bd3 = _bd_for_days(3)
+    bd14 = _bd_for_days(14)
+    bd56 = _bd_for_days(56)
+
+    print("[debug-score] params:", f"bell_sat={bell_sat}", f"bd_day_sat={bd_day_sat}")
+    print("[debug-score] A bell=40 maru=0 tel=0 ->", f"{score_a:.6f}")
+    print("[debug-score] B bell=39 maru=0 tel=0 ->", f"{score_b:.6f}")
+    print("[debug-score] C bell=40 maru=40 tel=0 ->", f"{score_c:.6f}")
+    print("[debug-score] BD score=0.9 for days=3 ->", f"{bd3:.6f}")
+    print("[debug-score] BD score=0.9 for days=14 ->", f"{bd14:.6f}")
+    print("[debug-score] BD score=0.9 for days=56 ->", f"{bd56:.6f}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--debug-score", action="store_true", help="print score/bd debug samples")
+    args = parser.parse_args()
+    if args.debug_score:
+        _debug_score_print()
