@@ -2364,7 +2364,7 @@ def calc_site_confidence(diag):
       テーブル行数が閾値以上：+20
       想定の列数が取れてる：+20
       “不明(other)”が多すぎる：-30
-      suspicious（cloudflare/robot）ヒット：-40
+      suspicious（cloudflare/robot）strong ヒット：-40
     """
     conf = 0
     issues = []
@@ -2407,9 +2407,12 @@ def calc_site_confidence(diag):
         conf -= 30
         issues.append("other_high")
 
-    if diag.get("suspicious_hit"):
+    suspicious_strength = diag.get("suspicious_strength")
+    if suspicious_strength == "strong":
         conf -= 40
         issues.append("suspicious")
+    elif diag.get("suspicious_hit"):
+        issues.append("suspicious_weak")
 
     if conf < 0: conf = 0
     if conf > 100: conf = 100
