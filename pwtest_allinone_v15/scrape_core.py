@@ -3984,30 +3984,25 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
                             waited += slow_step_ms
                             continue
                         if _looks_like_all_dash(stats):
-                            last_invalid_stats = dict(stats)
-                            last_invalid_stats["ok"] = False
-                            last_invalid_reason = "calendar_placeholders(all_dash)"
+                            if isinstance(stats, dict):
+                                stats["ok"] = True
+                                stats["empty_calendar"] = True
+                                stats["reason"] = "empty_calendar(all_dash)"
+                                stats["_detail"] = {
+                                    "sanity_retries": sanity_retry_count,
+                                    "sanity_last_reason": sanity_last_reason,
+                                }
                             if _detail_log_enabled():
                                 log_event(
                                     "DBG",
-                                    "calendar_all_dash_hold",
+                                    "calendar_all_dash_confirmed",
                                     preset=None,
                                     gid=None,
                                     waited_ms=waited,
                                     total_slots=stats.get("total_slots", 0),
                                     dash=stats.get("dash", 0),
                                 )
-                            if waited < _ALL_DASH_GRACE_MS and waited < max_wait_ms:
-                                await page.wait_for_timeout(slow_step_ms)
-                                waited += slow_step_ms
-                                continue
-                            slow_mode = True
-                            skip, why = await _is_not_reservable_page_async(page)
-                            if skip:
-                                return {"ok": False, "reason": f"not_reservable({why})"}, None
-                            await page.wait_for_timeout(slow_step_ms)
-                            waited += slow_step_ms
-                            continue
+                            return stats, last_frame_url
                         if isinstance(stats, dict):
                             stats["_detail"] = {
                                 "sanity_retries": sanity_retry_count,
