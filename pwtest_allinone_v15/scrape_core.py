@@ -2047,12 +2047,30 @@ def calc_site_confidence(diag):
     else:
         issues.append("iframe_ng")
 
-    if (diag.get("time_rows", 0) or 0) >= (diag.get("min_rows", 20) or 20):
+    time_rows = int(diag.get("time_rows", 0) or 0)
+    max_cols = int(diag.get("max_cols", 0) or 0)
+    total_slots = int(diag.get("total_slots", 0) or 0)
+    expected_total = diag.get("expected_total")
+    if expected_total is None:
+        expected_total = time_rows * max_cols
+    expected_total = int(expected_total or 0)
+    grid_present = diag.get("grid_present")
+    if grid_present is None:
+        grid_present = time_rows > 0 and max_cols > 0 and total_slots > 0
+        if grid_present and expected_total > 0:
+            ratio = total_slots / expected_total
+            if ratio < (diag.get("min_grid_ratio", 0.5) or 0.5):
+                grid_present = False
+
+    if grid_present:
+        conf += 40
+
+    if time_rows >= (diag.get("min_rows", 20) or 20):
         conf += 20
     else:
         issues.append("rows_low")
 
-    if (diag.get("max_cols", 0) or 0) >= (diag.get("min_cols", 7) or 7):
+    if max_cols >= (diag.get("min_cols", 7) or 7):
         conf += 20
     else:
         issues.append("cols_low")
@@ -4728,6 +4746,10 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
             "iframe_ok": bool(stats.get("ok")),
             "time_rows": stats.get("time_rows", 0) or 0,
             "max_cols": stats.get("max_cols", 0) or 0,
+            "total_slots": stats.get("total_slots", 0) or 0,
+            "td_count": stats.get("td_count", 0) or 0,
+            "expected_total": (stats.get("time_rows", 0) or 0) * (stats.get("max_cols", 0) or 0),
+            "empty_calendar": bool(stats.get("empty_calendar")),
             "other_ratio": stats.get("other_ratio", None),
             "suspicious_hit": bool(stats.get("suspicious_hit")),
             "min_rows": 20,
