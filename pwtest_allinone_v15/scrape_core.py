@@ -81,6 +81,31 @@ _LOGIN_IFRAME_KEYWORDS = (
     "ShareToReservationLogin",
     "S6ShareToReservationLogin",
 )
+_SUSPICIOUS_SCAN_MAX_BYTES = 200000
+_SUSPICIOUS_EXCERPT_CHARS = 180
+_SUSPICIOUS_DEFAULT_MAX_PER_RUN = 50
+_SUSPICIOUS_DEFAULT_MAX_HTML_BYTES = 200000
+_SUSPICIOUS_DUMP_COUNTS = {}
+_SUSPICIOUS_DUMP_LOCK = threading.Lock()
+_SUSPICIOUS_MARKERS = (
+    {"label": "cloudflare", "token": "cloudflare", "vendor": "cloudflare", "strength": "strong"},
+    {"label": "cf-chl", "token": "cf-chl", "vendor": "cloudflare", "strength": "strong"},
+    {"label": "turnstile", "token": "turnstile", "vendor": "turnstile", "strength": "strong"},
+    {"label": "hcaptcha", "token": "hcaptcha", "vendor": "hcaptcha", "strength": "strong"},
+    {"label": "recaptcha", "token": "recaptcha", "vendor": "recaptcha", "strength": "strong"},
+    {"label": "captcha", "token": "captcha", "vendor": None, "strength": "weak"},
+    {"label": "attention required", "token": "attention required", "vendor": "cloudflare", "strength": "strong"},
+    {"label": "verify you are human", "token": "verify you are human", "vendor": None, "strength": "strong"},
+    {"label": "unusual traffic", "token": "unusual traffic", "vendor": None, "strength": "strong"},
+    {"label": "datadome", "token": "datadome", "vendor": "datadome", "strength": "strong"},
+    {"label": "perimeterx", "token": "perimeterx", "vendor": "perimeterx", "strength": "strong"},
+    {
+        "label": "robot check",
+        "regex": re.compile(r"are you a robot|not a robot|robot check", re.I),
+        "vendor": None,
+        "strength": "strong",
+    },
+)
 
 def _probe_login_like_iframe_sync(page):
     iframe_src = ""
@@ -168,6 +193,270 @@ def _valid_url(url: str) -> bool:
     if u.scheme not in ("http", "https") or not u.netloc:
         return False
     return True
+
+def _limit_text_bytes(text: str, max_bytes: int) -> str:
+    if not text:
+        return ""
+    try:
+        raw = text.encode("utf-8")
+    except Exception:
+        return text[:max_bytes] if max_bytes else text
+    if max_bytes and len(raw) > max_bytes:
+        return raw[:max_bytes].decode("utf-8", errors="ignore")
+    return text
+
+def _make_excerpt(text: str, span: tuple[int, int], max_chars: int) -> str:
+    if not text or not span or max_chars <= 0:
+        return ""
+    start, end = span
+    half = max(10, max_chars // 2)
+    left = max(0, start - half)
+    right = min(len(text), end + half)
+    excerpt = text[left:right]
+    excerpt = re.sub(r"\s+", " ", excerpt).strip()
+    if len(excerpt) > max_chars:
+        excerpt = excerpt[:max_chars].rstrip()
+    return excerpt
+
+def _detect_suspicious_markers(page_html: str, frame_html: str) -> dict:
+    combined = (page_html or "")[:_SUSPICIOUS_SCAN_MAX_BYTES] + "\n" + (frame_html or "")[:_SUSPICIOUS_SCAN_MAX_BYTES]
+    if not combined.strip():
+        return {
+            "suspicious_hit": False,
+            "markers_hit": [],
+            "vendors": [],
+            "strength": None,
+            "excerpt": "",
+        }
+    lower = combined.lower()
+    markers = []
+    vendors = []
+    strengths = []
+    first_span = None
+    for marker in _SUSPICIOUS_MARKERS:
+        label = marker.get("label")
+        strength = marker.get("strength")
+        vendor = marker.get("vendor")
+        if marker.get("token"):
+            token = marker["token"]
+            idx = lower.find(token)
+            if idx >= 0:
+                if label and label not in markers:
+                    markers.append(label)
+                    strengths.append(strength)
+                    if vendor and vendor not in vendors:
+                        vendors.append(vendor)
+                if first_span is None:
+                    first_span = (idx, idx + len(token))
+        elif marker.get("regex"):
+            m = marker["regex"].search(combined)
+            if m:
+                if label and label not in markers:
+                    markers.append(label)
+                    strengths.append(strength)
+                    if vendor and vendor not in vendors:
+                        vendors.append(vendor)
+                if first_span is None:
+                    first_span = m.span()
+    hit = bool(markers)
+    strength = None
+    if hit:
+        if strengths and all(s == "weak" for s in strengths):
+            strength = "weak"
+        else:
+            strength = "strong"
+    excerpt = _make_excerpt(combined, first_span, _SUSPICIOUS_EXCERPT_CHARS) if first_span else ""
+    return {
+        "suspicious_hit": hit,
+        "markers_hit": markers,
+        "vendors": vendors,
+        "strength": strength,
+        "excerpt": excerpt,
+    }
+
+def _current_run_id() -> str:
+    run_dir = _CURRENT_RUN_DIR or ""
+    if run_dir:
+        base = os.path.basename(run_dir.rstrip("/\\"))
+        if base.startswith("run_"):
+            return base.replace("run_", "", 1)
+        if base:
+            return base
+    return _now_ts()
+
+def _get_suspicious_debug_config() -> dict:
+    cfg = load_config()
+    debug_cfg = cfg.get("debug", {}) if isinstance(cfg, dict) else {}
+    suspicious_cfg = debug_cfg.get("suspicious", {}) if isinstance(debug_cfg, dict) else {}
+    enabled = suspicious_cfg.get("enabled", True)
+    max_per_run = int(suspicious_cfg.get("max_per_run", _SUSPICIOUS_DEFAULT_MAX_PER_RUN) or 0)
+    max_html_bytes = int(suspicious_cfg.get("max_html_bytes", _SUSPICIOUS_DEFAULT_MAX_HTML_BYTES) or 0)
+    full_page = bool(suspicious_cfg.get("full_page", False))
+    return {
+        "enabled": bool(enabled),
+        "max_per_run": max_per_run,
+        "max_html_bytes": max_html_bytes,
+        "full_page": full_page,
+    }
+
+def _claim_suspicious_dump_slot(run_id: str, max_per_run: int) -> bool:
+    if max_per_run <= 0:
+        return False
+    with _SUSPICIOUS_DUMP_LOCK:
+        count = _SUSPICIOUS_DUMP_COUNTS.get(run_id, 0)
+        if count >= max_per_run:
+            return False
+        _SUSPICIOUS_DUMP_COUNTS[run_id] = count + 1
+        return True
+
+def _suspicious_debug_dir(run_id: str, preset: str, gid: str) -> str:
+    ensure_data_dirs()
+    base = os.path.join(DATA_ROOT, "debug", "suspicious", run_id)
+    safe_preset = _safe_name(preset or "preset")
+    safe_gid = _safe_name(gid or "gid")
+    path = os.path.join(base, safe_preset, safe_gid)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def _dump_suspicious_debug_sync(page, fr, preset: str, gid: str, page_html: str, frame_html: str, meta: dict):
+    try:
+        cfg = _get_suspicious_debug_config()
+        if not cfg.get("enabled"):
+            return None
+        run_id = _current_run_id()
+        if not _claim_suspicious_dump_slot(run_id, cfg.get("max_per_run", 0)):
+            return None
+        out_dir = _suspicious_debug_dir(run_id, preset, gid)
+        ts = _now_ts()
+        prefix = os.path.join(out_dir, ts)
+        paths = {}
+        max_html_bytes = cfg.get("max_html_bytes", _SUSPICIOUS_DEFAULT_MAX_HTML_BYTES)
+
+        try:
+            html = _limit_text_bytes(page_html or "", max_html_bytes)
+            if html:
+                p_html = prefix + "_page.html"
+                with open(p_html, "w", encoding="utf-8") as w:
+                    w.write(html)
+                paths["page_html"] = p_html
+        except Exception:
+            pass
+
+        try:
+            html = _limit_text_bytes(frame_html or "", max_html_bytes)
+            if html:
+                p_html = prefix + "_frame.html"
+                with open(p_html, "w", encoding="utf-8") as w:
+                    w.write(html)
+                paths["frame_html"] = p_html
+        except Exception:
+            pass
+
+        try:
+            p_png = prefix + "_page.png"
+            page.screenshot(path=p_png, full_page=cfg.get("full_page", False))
+            paths["page_png"] = p_png
+        except Exception:
+            pass
+
+        try:
+            if fr:
+                el = fr.frame_element()
+                p_png = prefix + "_frame.png"
+                el.screenshot(path=p_png)
+                paths["frame_png"] = p_png
+        except Exception:
+            pass
+
+        try:
+            meta_path = prefix + "_meta.json"
+            with open(meta_path, "w", encoding="utf-8") as w:
+                json.dump(meta or {}, w, ensure_ascii=False, indent=2)
+            paths["meta_json"] = meta_path
+        except Exception:
+            pass
+
+        log_event(
+            "INFO",
+            "suspicious dump saved",
+            preset=preset,
+            gid=gid,
+            run_id=run_id,
+            files=paths,
+        )
+        return paths
+    except Exception:
+        return None
+
+async def _dump_suspicious_debug_async(page, fr, preset: str, gid: str, page_html: str, frame_html: str, meta: dict):
+    try:
+        cfg = _get_suspicious_debug_config()
+        if not cfg.get("enabled"):
+            return None
+        run_id = _current_run_id()
+        if not _claim_suspicious_dump_slot(run_id, cfg.get("max_per_run", 0)):
+            return None
+        out_dir = _suspicious_debug_dir(run_id, preset, gid)
+        ts = _now_ts()
+        prefix = os.path.join(out_dir, ts)
+        paths = {}
+        max_html_bytes = cfg.get("max_html_bytes", _SUSPICIOUS_DEFAULT_MAX_HTML_BYTES)
+
+        try:
+            html = _limit_text_bytes(page_html or "", max_html_bytes)
+            if html:
+                p_html = prefix + "_page.html"
+                with open(p_html, "w", encoding="utf-8") as w:
+                    w.write(html)
+                paths["page_html"] = p_html
+        except Exception:
+            pass
+
+        try:
+            html = _limit_text_bytes(frame_html or "", max_html_bytes)
+            if html:
+                p_html = prefix + "_frame.html"
+                with open(p_html, "w", encoding="utf-8") as w:
+                    w.write(html)
+                paths["frame_html"] = p_html
+        except Exception:
+            pass
+
+        try:
+            p_png = prefix + "_page.png"
+            await page.screenshot(path=p_png, full_page=cfg.get("full_page", False))
+            paths["page_png"] = p_png
+        except Exception:
+            pass
+
+        try:
+            if fr:
+                el = await fr.frame_element()
+                p_png = prefix + "_frame.png"
+                await el.screenshot(path=p_png)
+                paths["frame_png"] = p_png
+        except Exception:
+            pass
+
+        try:
+            meta_path = prefix + "_meta.json"
+            with open(meta_path, "w", encoding="utf-8") as w:
+                json.dump(meta or {}, w, ensure_ascii=False, indent=2)
+            paths["meta_json"] = meta_path
+        except Exception:
+            pass
+
+        log_event(
+            "INFO",
+            "suspicious dump saved",
+            preset=preset,
+            gid=gid,
+            run_id=run_id,
+            files=paths,
+        )
+        return paths
+    except Exception:
+        return None
 
 def _detail_log_skip(preset: str = None, gid: str = None, reason: str = ""):
     if not _detail_log_enabled():
@@ -1145,7 +1434,7 @@ def try_get_name_from_detail_page(name_page, detail_url):
             pass
     return ""
 
-def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progress_cb=None, max_wait_ms: int = None):
+def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progress_cb=None, max_wait_ms: int = None, preset: str = None, gid: str = None):
     """
     iframe内のテーブルを「枠（スロット）」として再構築し、
     rowspan を展開して bell / ○ / TEL / ― / × を“枠数”で集計する。
@@ -1169,6 +1458,7 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
     sanity_last_reason = None
     frame_names = []
     frame_urls = []
+    suspicious_dumped = False
     while waited <= max_wait_ms:
         if stop_evt.is_set():
             return None, None
@@ -1535,18 +1825,55 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
 })()
 """)
                 suspicious_hit = False
+                suspicious_meta = None
+                page_html = ""
+                frame_html = ""
                 try:
-                    h1 = (page.content() or "")
-                    h2 = (fr.content() or "")
-                    blob = (h1[:200000] + "\n" + h2[:200000]).lower()
-                    # bot/防御系の強い兆候のみ（ページ内の「ロボット」文言だけでは誤検知しやすい）
-                    if ("cloudflare" in blob) or ("cf-chl" in blob) or ("turnstile" in blob) or ("hcaptcha" in blob) or ("recaptcha" in blob) or ("captcha" in blob) or ("attention required" in blob) or ("verify you are human" in blob) or ("unusual traffic" in blob) or re.search(r"are you a robot|not a robot|robot check", blob):
-
-                        suspicious_hit = True
+                    page_html = (page.content() or "")
+                    frame_html = (fr.content() or "")
+                    detect = _detect_suspicious_markers(page_html, frame_html)
+                    suspicious_hit = bool(detect.get("suspicious_hit"))
+                    suspicious_meta = detect
                 except Exception:
                     pass
                 if isinstance(stats, dict):
                     stats["suspicious_hit"] = suspicious_hit
+                    markers_hit = (suspicious_meta or {}).get("markers_hit") or []
+                    vendors = (suspicious_meta or {}).get("vendors") or []
+                    strength = (suspicious_meta or {}).get("strength")
+                    excerpt = (suspicious_meta or {}).get("excerpt") or ""
+                    if suspicious_hit and not vendors:
+                        vendor_value = "unknown"
+                    elif len(vendors) == 1:
+                        vendor_value = vendors[0]
+                    elif vendors:
+                        vendor_value = vendors
+                    else:
+                        vendor_value = None
+                    stats["suspicious_markers_hit"] = markers_hit
+                    stats["suspicious_vendor"] = vendor_value
+                    stats["suspicious_excerpt"] = excerpt
+                    stats["suspicious_strength"] = strength
+                    if suspicious_hit and not suspicious_dumped:
+                        suspicious_dumped = True
+                        _dump_suspicious_debug_sync(
+                            page,
+                            fr,
+                            preset,
+                            gid,
+                            page_html,
+                            frame_html,
+                            {
+                                "preset": preset,
+                                "gid": gid,
+                                "page_url": getattr(page, "url", ""),
+                                "frame_url": frame_url or getattr(fr, "url", ""),
+                                "markers_hit": markers_hit,
+                                "vendors": vendors,
+                                "strength": strength,
+                                "excerpt": excerpt,
+                            },
+                        )
                     last_frame_url = frame_url or fr.url
                     if stats.get("ok"):
                         last_frame = fr
@@ -1828,7 +2155,7 @@ def count_calendar_stats_by_slots(page, stop_evt: threading.Event, progress_cb=N
             _detail_log_iframe_wait(preset, gid, short_ms, long_ms, "skip")
             return {"ok": False, "reason": "not_reservable"}, None
 
-    stats, frame_url = _count_calendar_stats_by_slots_core(page, stop_evt, progress_cb, short_ms)
+    stats, frame_url = _count_calendar_stats_by_slots_core(page, stop_evt, progress_cb, short_ms, preset=preset, gid=gid)
     if stats is None and stop_evt.is_set():
         return None, None
     if stats and isinstance(stats, dict) and stats.get("ok"):
@@ -1944,7 +2271,7 @@ def count_calendar_stats_by_slots(page, stop_evt: threading.Event, progress_cb=N
         _detail_log_iframe_wait(preset, gid, short_ms, long_ms, "short")
         return stats, frame_url
 
-    stats, frame_url = _count_calendar_stats_by_slots_core(page, stop_evt, progress_cb, long_ms)
+    stats, frame_url = _count_calendar_stats_by_slots_core(page, stop_evt, progress_cb, long_ms, preset=preset, gid=gid)
     _detail_log_iframe_wait(preset, gid, short_ms, long_ms, "long")
     return stats, frame_url
 
@@ -3178,6 +3505,14 @@ def load_config():
         "retention": {
             "months": 6,
             "max_lines": 200
+        },
+        "debug": {
+            "suspicious": {
+                "enabled": True,
+                "max_per_run": _SUSPICIOUS_DEFAULT_MAX_PER_RUN,
+                "max_html_bytes": _SUSPICIOUS_DEFAULT_MAX_HTML_BYTES,
+                "full_page": False
+            }
         }
     }
     try:
@@ -3478,7 +3813,7 @@ async def _dump_list_debug_async(page, preset_name: str, list_url: str, note: st
         pass
 
 
-async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = None):
+async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = None, preset: str = None, gid: str = None):
     waited = 0
     if max_wait_ms is None:
         max_wait_ms = min(CAL_WAIT_MS, CAL_WAIT_LONG_MS)
@@ -3499,6 +3834,7 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
     sanity_last_reason = None
     frame_names = []
     frame_urls = []
+    suspicious_dumped = False
     while waited <= max_wait_ms:
         fr = None
         frame_url = ""
@@ -3958,16 +4294,55 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
 })()
 """)
                 suspicious_hit = False
+                suspicious_meta = None
+                page_html = ""
+                frame_html = ""
                 try:
-                    h1 = (await page.content()) or ""
-                    h2 = (await fr.content()) or ""
-                    blob = (h1[:200000] + "\n" + h2[:200000]).lower()
-                    if ("cloudflare" in blob) or ("cf-chl" in blob) or ("turnstile" in blob) or ("hcaptcha" in blob) or ("datadome" in blob) or ("perimeterx" in blob):
-                        suspicious_hit = True
+                    page_html = (await page.content()) or ""
+                    frame_html = (await fr.content()) or ""
+                    detect = _detect_suspicious_markers(page_html, frame_html)
+                    suspicious_hit = bool(detect.get("suspicious_hit"))
+                    suspicious_meta = detect
                 except Exception:
                     pass
                 if isinstance(stats, dict):
                     stats["suspicious_hit"] = suspicious_hit
+                    markers_hit = (suspicious_meta or {}).get("markers_hit") or []
+                    vendors = (suspicious_meta or {}).get("vendors") or []
+                    strength = (suspicious_meta or {}).get("strength")
+                    excerpt = (suspicious_meta or {}).get("excerpt") or ""
+                    if suspicious_hit and not vendors:
+                        vendor_value = "unknown"
+                    elif len(vendors) == 1:
+                        vendor_value = vendors[0]
+                    elif vendors:
+                        vendor_value = vendors
+                    else:
+                        vendor_value = None
+                    stats["suspicious_markers_hit"] = markers_hit
+                    stats["suspicious_vendor"] = vendor_value
+                    stats["suspicious_excerpt"] = excerpt
+                    stats["suspicious_strength"] = strength
+                    if suspicious_hit and not suspicious_dumped:
+                        suspicious_dumped = True
+                        await _dump_suspicious_debug_async(
+                            page,
+                            fr,
+                            preset,
+                            gid,
+                            page_html,
+                            frame_html,
+                            {
+                                "preset": preset,
+                                "gid": gid,
+                                "page_url": getattr(page, "url", ""),
+                                "frame_url": frame_url or getattr(fr, "url", ""),
+                                "markers_hit": markers_hit,
+                                "vendors": vendors,
+                                "strength": strength,
+                                "excerpt": excerpt,
+                            },
+                        )
                     last_frame_url = frame_url or fr.url
                     if stats.get("ok"):
                         last_frame = fr
@@ -4249,7 +4624,7 @@ async def count_calendar_stats_by_slots_async(page, preset: str = None, gid: str
             _detail_log_iframe_wait(preset, gid, short_ms, long_ms, "skip")
             return {"ok": False, "reason": "not_reservable"}, None
 
-    stats, frame_url = await _count_calendar_stats_by_slots_async_core(page, short_ms)
+    stats, frame_url = await _count_calendar_stats_by_slots_async_core(page, short_ms, preset=preset, gid=gid)
     if stats and isinstance(stats, dict) and stats.get("ok"):
         _detail_log_iframe_wait(preset, gid, short_ms, long_ms, "short")
         return stats, frame_url
@@ -4363,7 +4738,7 @@ async def count_calendar_stats_by_slots_async(page, preset: str = None, gid: str
         _detail_log_iframe_wait(preset, gid, short_ms, long_ms, "short")
         return stats, frame_url
 
-    stats, frame_url = await _count_calendar_stats_by_slots_async_core(page, long_ms)
+    stats, frame_url = await _count_calendar_stats_by_slots_async_core(page, long_ms, preset=preset, gid=gid)
     _detail_log_iframe_wait(preset, gid, short_ms, long_ms, "long")
     return stats, frame_url
 
@@ -4752,6 +5127,10 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
             "empty_calendar": bool(stats.get("empty_calendar")),
             "other_ratio": stats.get("other_ratio", None),
             "suspicious_hit": bool(stats.get("suspicious_hit")),
+            "suspicious_markers_hit": stats.get("suspicious_markers_hit") or [],
+            "suspicious_markers_count": len(stats.get("suspicious_markers_hit") or []),
+            "suspicious_strength": stats.get("suspicious_strength"),
+            "suspicious_vendor": stats.get("suspicious_vendor"),
             "min_rows": 20,
             "min_cols": 7,
             "max_other_ratio": 0.35,
