@@ -3366,6 +3366,9 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
     params = _get_score_params()
     bell_sat = params.get("bell_sat", 18)
     trust_day_sat = params.get("trust_day_sat", 18)
+    cfg = load_config()
+    score_cfg = cfg.get("score", {}) if isinstance(cfg.get("score"), dict) else {}
+    min_conf = int(score_cfg.get("bd_input_min_confidence", 0) or 0)
 
     def _parse_iso_date(val):
         if not val:
@@ -3446,6 +3449,10 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
     for h in hist or []:
         if not isinstance(h, dict):
             continue
+        if min_conf > 0:
+            conf = int(h.get("site_confidence", 0) or 0)
+            if conf < min_conf:
+                continue
         obs_date = _obs_date_from_entry(h)
         if obs_date:
             obs_dates.add(obs_date)
@@ -3567,7 +3574,6 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
             key=lambda r: (
                 -_safe_float(r.get("score")),
                 -_safe_float(r.get("delta")),
-                -_safe_float(r.get("site_confidence")),
                 str(r.get("name") or ""),
             ),
         )
@@ -3764,7 +3770,8 @@ def load_config():
         "score": {
             "bell_sat": 18,
             "bd_day_sat": 14,
-            "trust_day_sat": 18
+            "trust_day_sat": 18,
+            "bd_input_min_confidence": 0
         },
         "retention": {
             "months": 6,
@@ -5151,7 +5158,6 @@ def _delta_report(prev_rows, cur_rows, top_n=5, min_conf=0):
         conf = int(cur.get("site_confidence", 0) or 0)
         if conf < min_conf:
             bad_conf += 1
-            continue
         prev = pm.get(k)
         if not prev:
             continue
@@ -5696,13 +5702,13 @@ async def run_auto_once(preset_names=None, headless=True, minimize_browser=True,
 
             quality = _summarize_row_quality(all_rows)
             total_rows = len(all_rows)
-            adopted_rows = total_rows - int(rep.get("bad_conf_skipped", 0) or 0)
+            bad_conf = int(rep.get("bad_conf_skipped", 0) or 0)
             run_id = _current_run_id()
             suspicious_summary = _get_suspicious_dump_summary(run_id)
             summary_line = (
                 f"抽出:{total_rows}件 OK:{quality['OK']} WARN:{quality['WARN']} BAD:{quality['BAD']} "
-                f"採用:{adopted_rows} 除外:{rep.get('bad_conf_skipped', 0)} "
-                f"(min_conf:{min_conf}) suspicious: 保存{suspicious_summary.get('saved', 0)} / 抑止{suspicious_summary.get('suppressed', 0)}"
+                f"低信頼:{bad_conf} (min_conf:{min_conf}) "
+                f"suspicious: 保存{suspicious_summary.get('saved', 0)} / 抑止{suspicious_summary.get('suppressed', 0)}"
             )
 
             lines = [summary_line]
