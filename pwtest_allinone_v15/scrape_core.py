@@ -67,6 +67,10 @@ _CAL_MIN_COLS = 5
 _CAL_MAX_COLS = 8
 _CAL_TD_MIN_RATIO = 0.30
 _CAL_TD_MAX_RATIO = 2.50
+_QUALITY_HEADER_DATES_MIN = 3
+_QUALITY_OK_MIN = 80
+_QUALITY_WARN_MIN = 60
+_QUALITY_ALL_DASH_PENALTY = 8
 _RESERVATION_BLOCK_TEXTS = [
     "予約できません",
     "予約できない",
@@ -83,17 +87,26 @@ _LOGIN_IFRAME_KEYWORDS = (
 )
 _SUSPICIOUS_SCAN_MAX_BYTES = 200000
 _SUSPICIOUS_EXCERPT_CHARS = 180
-_SUSPICIOUS_DEFAULT_MAX_PER_RUN = 50
+_SUSPICIOUS_DEFAULT_MAX_PER_RUN = 4
+_SUSPICIOUS_DEFAULT_MAX_PER_PRESET = 2
 _SUSPICIOUS_DEFAULT_MAX_HTML_BYTES = 200000
 _SUSPICIOUS_DUMP_COUNTS = {}
+_SUSPICIOUS_DUMP_PRESET_COUNTS = {}
+_SUSPICIOUS_DUMP_STATS = {}
 _SUSPICIOUS_DUMP_LOCK = threading.Lock()
 _SUSPICIOUS_MARKERS = (
     {"label": "cloudflare", "token": "cloudflare", "vendor": "cloudflare", "strength": "strong"},
     {"label": "cf-chl", "token": "cf-chl", "vendor": "cloudflare", "strength": "strong"},
     {"label": "turnstile", "token": "turnstile", "vendor": "turnstile", "strength": "strong"},
     {"label": "hcaptcha", "token": "hcaptcha", "vendor": "hcaptcha", "strength": "strong"},
-    {"label": "recaptcha", "token": "recaptcha", "vendor": "recaptcha", "strength": "strong"},
+    {"label": "recaptcha", "token": "recaptcha", "vendor": "recaptcha", "strength": "weak"},
     {"label": "captcha", "token": "captcha", "vendor": None, "strength": "weak"},
+    {"label": "access denied", "token": "access denied", "vendor": None, "strength": "strong"},
+    {"label": "forbidden", "token": "forbidden", "vendor": None, "strength": "strong"},
+    {"label": "too many requests", "token": "too many requests", "vendor": None, "strength": "strong"},
+    {"label": "blocked", "token": "blocked", "vendor": None, "strength": "strong"},
+    {"label": "enable javascript", "token": "enable javascript", "vendor": None, "strength": "weak"},
+    {"label": "please enable cookies", "token": "please enable cookies", "vendor": None, "strength": "weak"},
     {"label": "attention required", "token": "attention required", "vendor": "cloudflare", "strength": "strong"},
     {"label": "verify you are human", "token": "verify you are human", "vendor": None, "strength": "strong"},
     {"label": "unusual traffic", "token": "unusual traffic", "vendor": None, "strength": "strong"},
@@ -290,24 +303,54 @@ def _get_suspicious_debug_config() -> dict:
     suspicious_cfg = debug_cfg.get("suspicious", {}) if isinstance(debug_cfg, dict) else {}
     enabled = suspicious_cfg.get("enabled", True)
     max_per_run = int(suspicious_cfg.get("max_per_run", _SUSPICIOUS_DEFAULT_MAX_PER_RUN) or 0)
+    max_per_preset = int(suspicious_cfg.get("max_per_preset", _SUSPICIOUS_DEFAULT_MAX_PER_PRESET) or 0)
     max_html_bytes = int(suspicious_cfg.get("max_html_bytes", _SUSPICIOUS_DEFAULT_MAX_HTML_BYTES) or 0)
     full_page = bool(suspicious_cfg.get("full_page", False))
     return {
         "enabled": bool(enabled),
         "max_per_run": max_per_run,
+        "max_per_preset": max_per_preset,
         "max_html_bytes": max_html_bytes,
         "full_page": full_page,
     }
 
-def _claim_suspicious_dump_slot(run_id: str, max_per_run: int) -> bool:
-    if max_per_run <= 0:
+def _get_suspicious_dump_stats(run_id: str) -> dict:
+    return _SUSPICIOUS_DUMP_STATS.setdefault(run_id, {"saved": 0, "suppressed": 0, "presets": {}})
+
+def _record_suspicious_dump_saved(run_id: str, preset: str):
+    stats = _get_suspicious_dump_stats(run_id)
+    stats["saved"] += 1
+    preset_stats = stats["presets"].setdefault(preset, {"saved": 0, "suppressed": 0})
+    preset_stats["saved"] += 1
+
+def _record_suspicious_dump_suppressed(run_id: str, preset: str):
+    stats = _get_suspicious_dump_stats(run_id)
+    stats["suppressed"] += 1
+    preset_stats = stats["presets"].setdefault(preset, {"saved": 0, "suppressed": 0})
+    preset_stats["suppressed"] += 1
+
+def _claim_suspicious_dump_slot(run_id: str, preset: str, max_per_run: int, max_per_preset: int) -> bool:
+    if max_per_run <= 0 or max_per_preset <= 0:
+        _record_suspicious_dump_suppressed(run_id, preset)
         return False
     with _SUSPICIOUS_DUMP_LOCK:
         count = _SUSPICIOUS_DUMP_COUNTS.get(run_id, 0)
-        if count >= max_per_run:
+        preset_counts = _SUSPICIOUS_DUMP_PRESET_COUNTS.setdefault(run_id, {})
+        preset_count = preset_counts.get(preset, 0)
+        if count >= max_per_run or preset_count >= max_per_preset:
+            _record_suspicious_dump_suppressed(run_id, preset)
             return False
         _SUSPICIOUS_DUMP_COUNTS[run_id] = count + 1
+        preset_counts[preset] = preset_count + 1
+        _record_suspicious_dump_saved(run_id, preset)
         return True
+
+def _get_suspicious_dump_summary(run_id: str, preset: str = None) -> dict:
+    stats = _get_suspicious_dump_stats(run_id)
+    if preset:
+        preset_stats = stats.get("presets", {}).get(preset, {"saved": 0, "suppressed": 0})
+        return {"saved": preset_stats.get("saved", 0), "suppressed": preset_stats.get("suppressed", 0)}
+    return {"saved": stats.get("saved", 0), "suppressed": stats.get("suppressed", 0)}
 
 def _suspicious_debug_dir(run_id: str, preset: str, gid: str) -> str:
     ensure_data_dirs()
@@ -324,7 +367,12 @@ def _dump_suspicious_debug_sync(page, fr, preset: str, gid: str, page_html: str,
         if not cfg.get("enabled"):
             return None
         run_id = _current_run_id()
-        if not _claim_suspicious_dump_slot(run_id, cfg.get("max_per_run", 0)):
+        if not _claim_suspicious_dump_slot(
+            run_id,
+            preset or "preset",
+            cfg.get("max_per_run", 0),
+            cfg.get("max_per_preset", 0),
+        ):
             return None
         out_dir = _suspicious_debug_dir(run_id, preset, gid)
         ts = _now_ts()
@@ -377,7 +425,7 @@ def _dump_suspicious_debug_sync(page, fr, preset: str, gid: str, page_html: str,
             pass
 
         log_event(
-            "INFO",
+            "DBG",
             "suspicious dump saved",
             preset=preset,
             gid=gid,
@@ -394,7 +442,12 @@ async def _dump_suspicious_debug_async(page, fr, preset: str, gid: str, page_htm
         if not cfg.get("enabled"):
             return None
         run_id = _current_run_id()
-        if not _claim_suspicious_dump_slot(run_id, cfg.get("max_per_run", 0)):
+        if not _claim_suspicious_dump_slot(
+            run_id,
+            preset or "preset",
+            cfg.get("max_per_run", 0),
+            cfg.get("max_per_preset", 0),
+        ):
             return None
         out_dir = _suspicious_debug_dir(run_id, preset, gid)
         ts = _now_ts()
@@ -447,7 +500,7 @@ async def _dump_suspicious_debug_async(page, fr, preset: str, gid: str, page_htm
             pass
 
         log_event(
-            "INFO",
+            "DBG",
             "suspicious dump saved",
             preset=preset,
             gid=gid,
@@ -1722,10 +1775,15 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
       if (col >= maxCols) break;
     }
   }
+  const headerDateKeySet = new Set();
+  for (const key of columnDateKeys) {
+    if (key) headerDateKeySet.add(key);
+  }
+  const headerDateCount = headerDateKeySet.size;
 
   const rowCount = dataRows.length;
   const grid = Array.from({ length: rowCount }, () => Array(maxCols).fill(null));
-  const out = { ok:true, bell:0, maru:0, tel:0, dash:0, other:0, total_slots:0, bookable_slots:0, excluded_slots:0, time_rows: rowCount, max_cols: maxCols, td_count:0 };
+  const out = { ok:true, bell:0, maru:0, tel:0, dash:0, other:0, total_slots:0, bookable_slots:0, excluded_slots:0, time_rows: rowCount, max_cols: maxCols, td_count:0, header_dates: headerDateCount, slots_unique: 0 };
   const statsByDate = {};
   function ensureDateKey(key) {
     if (!statsByDate[key]) statsByDate[key] = { bell:0, maru:0, tel:0, other:0 };
@@ -1818,6 +1876,13 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
     }
   }
 
+  let uniqueSlots = 0;
+  for (let r = 0; r < rowCount; r++) {
+    for (let c = 0; c < maxCols; c++) {
+      if (grid[r][c] && grid[r][c] !== "excluded_notice_big") uniqueSlots += 1;
+    }
+  }
+  out.slots_unique = uniqueSlots;
   out.bell_rate_total = out.total_slots ? (out.bell / out.total_slots) : null;
   out.bell_rate_bookable = out.bookable_slots ? (out.bell / out.bookable_slots) : null;
   out.stats_by_date = statsByDate;
@@ -1854,7 +1919,8 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
                     stats["suspicious_vendor"] = vendor_value
                     stats["suspicious_excerpt"] = excerpt
                     stats["suspicious_strength"] = strength
-                    if suspicious_hit and not suspicious_dumped:
+                    should_dump = _should_dump_suspicious(stats, suspicious_meta or {}, frame_url=frame_url or getattr(fr, "url", ""))
+                    if should_dump and not suspicious_dumped:
                         suspicious_dumped = True
                         _dump_suspicious_debug_sync(
                             page,
@@ -2355,68 +2421,104 @@ def calc_delta_popularity(prev_stats, cur_stats):
     if d >  1.0: d =  1.0
     return d
 
+def _row_quality_diag_from_stats(stats: dict, frame_url: str = None, parse_errors: list = None) -> dict:
+    stats = stats or {}
+    stats_by_date = stats.get("stats_by_date") if isinstance(stats.get("stats_by_date"), dict) else {}
+    header_dates = len(stats_by_date or {})
+    total_slots = int(stats.get("total_slots", 0) or 0)
+    counts_sum = (
+        int(stats.get("bell", 0) or 0)
+        + int(stats.get("maru", 0) or 0)
+        + int(stats.get("tel", 0) or 0)
+        + int(stats.get("dash", 0) or 0)
+        + int(stats.get("other", 0) or 0)
+    )
+    slots_unique = int(stats.get("slots_unique", 0) or 0) or counts_sum
+    has_calendar_table = bool(stats.get("ok")) or bool(stats.get("time_rows", 0)) or bool(stats.get("max_cols", 0)) or bool(stats.get("td_count", 0))
+    return {
+        "has_calendar_table": has_calendar_table,
+        "header_dates": int(stats.get("header_dates", header_dates) or 0),
+        "slots_total": total_slots,
+        "counts_sum": counts_sum,
+        "parse_errors": parse_errors or stats.get("parse_errors") or [],
+        "has_iframe": bool(frame_url),
+        "has_time_axis": int(stats.get("time_rows", 0) or 0) > 0,
+        "slots_unique": slots_unique,
+        "all_dash": _looks_like_all_dash(stats),
+    }
+
+def _calc_row_quality(diag: dict) -> tuple[int, str, list, bool]:
+    score = 100
+    reasons = []
+    core_missing = False
+
+    if not diag.get("has_calendar_table"):
+        score -= 40
+        reasons.append("missing_calendar_table")
+        core_missing = True
+    if int(diag.get("header_dates", 0) or 0) < _QUALITY_HEADER_DATES_MIN:
+        score -= 25
+        reasons.append("header_dates_low")
+        core_missing = True
+    if int(diag.get("slots_total", 0) or 0) <= 0:
+        score -= 40
+        reasons.append("slots_total_zero")
+        core_missing = True
+    if int(diag.get("counts_sum", 0) or 0) != int(diag.get("slots_total", 0) or 0):
+        score -= 30
+        reasons.append("slot_count_mismatch")
+        core_missing = True
+    if diag.get("parse_errors"):
+        score -= 30
+        reasons.append("parse_errors")
+        core_missing = True
+
+    if diag.get("has_iframe"):
+        score += 5
+        reasons.append("has_iframe")
+    if diag.get("has_time_axis"):
+        score += 5
+        reasons.append("has_time_axis")
+    if int(diag.get("slots_unique", 0) or 0) == int(diag.get("slots_total", 0) or 0) and int(diag.get("slots_total", 0) or 0) > 0:
+        score += 5
+        reasons.append("slots_unique_match")
+    if diag.get("all_dash"):
+        score -= _QUALITY_ALL_DASH_PENALTY
+        reasons.append("all_dash")
+
+    if score < 0:
+        score = 0
+    if score > 100:
+        score = 100
+
+    if score >= _QUALITY_OK_MIN:
+        grade = "OK"
+    elif score >= _QUALITY_WARN_MIN:
+        grade = "WARN"
+    else:
+        grade = "BAD"
+    return score, grade, reasons, core_missing
+
+def _should_dump_suspicious(stats: dict, detect: dict, frame_url: str = None) -> bool:
+    if not detect or not detect.get("suspicious_hit"):
+        return False
+    diag = _row_quality_diag_from_stats(stats, frame_url=frame_url)
+    _, grade, _, core_missing = _calc_row_quality(diag)
+    strength = detect.get("strength")
+    if strength == "strong" and grade == "BAD":
+        return True
+    if strength == "weak" and core_missing:
+        return True
+    return False
+
 def calc_site_confidence(diag):
     """
     サイト/取得の信頼度（0〜100）
     ※ キャスト評価には加えない（別軸）
-    ルール（ユーザー指定）：
-      iframe取得成功：+40
-      テーブル行数が閾値以上：+20
-      想定の列数が取れてる：+20
-      “不明(other)”が多すぎる：-30
-      suspicious（cloudflare/robot）strong ヒット：-40
+    ルール：構造整合性を最重視した row_quality を返す。
     """
-    conf = 0
-    issues = []
-
-    if diag.get("iframe_ok"):
-        conf += 40
-    else:
-        issues.append("iframe_ng")
-
-    time_rows = int(diag.get("time_rows", 0) or 0)
-    max_cols = int(diag.get("max_cols", 0) or 0)
-    total_slots = int(diag.get("total_slots", 0) or 0)
-    expected_total = diag.get("expected_total")
-    if expected_total is None:
-        expected_total = time_rows * max_cols
-    expected_total = int(expected_total or 0)
-    grid_present = diag.get("grid_present")
-    if grid_present is None:
-        grid_present = time_rows > 0 and max_cols > 0 and total_slots > 0
-        if grid_present and expected_total > 0:
-            ratio = total_slots / expected_total
-            if ratio < (diag.get("min_grid_ratio", 0.5) or 0.5):
-                grid_present = False
-
-    if grid_present:
-        conf += 40
-
-    if time_rows >= (diag.get("min_rows", 20) or 20):
-        conf += 20
-    else:
-        issues.append("rows_low")
-
-    if max_cols >= (diag.get("min_cols", 7) or 7):
-        conf += 20
-    else:
-        issues.append("cols_low")
-
-    other_ratio = diag.get("other_ratio")
-    if other_ratio is not None and other_ratio > (diag.get("max_other_ratio", 0.35) or 0.35):
-        conf -= 30
-        issues.append("other_high")
-
-    suspicious_strength = diag.get("suspicious_strength")
-    if suspicious_strength == "strong":
-        conf -= 40
-        issues.append("suspicious")
-    elif diag.get("suspicious_hit"):
-        issues.append("suspicious_weak")
-
-    if conf < 0: conf = 0
-    if conf > 100: conf = 100
-    return conf, issues
+    score, _grade, reasons, _core_missing = _calc_row_quality(diag or {})
+    return score, reasons
 
 def _safe_name(s: str):
     s = re.sub(r"[\\/:*?\"<>|\s]+", "_", s or "").strip("_")
@@ -3513,6 +3615,7 @@ def load_config():
             "suspicious": {
                 "enabled": True,
                 "max_per_run": _SUSPICIOUS_DEFAULT_MAX_PER_RUN,
+                "max_per_preset": _SUSPICIOUS_DEFAULT_MAX_PER_PRESET,
                 "max_html_bytes": _SUSPICIOUS_DEFAULT_MAX_HTML_BYTES,
                 "full_page": False
             }
@@ -4189,10 +4292,15 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
       if (col >= maxCols) break;
     }
   }
+  const headerDateKeySet = new Set();
+  for (const key of columnDateKeys) {
+    if (key) headerDateKeySet.add(key);
+  }
+  const headerDateCount = headerDateKeySet.size;
 
   const rowCount = dataRows.length;
   const grid = Array.from({ length: rowCount }, () => Array(maxCols).fill(null));
-  const out = { ok:true, bell:0, maru:0, tel:0, dash:0, other:0, total_slots:0, bookable_slots:0, excluded_slots:0, time_rows:rowCount, max_cols:maxCols, td_count:0, symbols:{} };
+  const out = { ok:true, bell:0, maru:0, tel:0, dash:0, other:0, total_slots:0, bookable_slots:0, excluded_slots:0, time_rows:rowCount, max_cols:maxCols, td_count:0, header_dates: headerDateCount, slots_unique: 0, symbols:{} };
   const statsByDate = {};
   function ensureDateKey(key) {
     if (!statsByDate[key]) statsByDate[key] = { bell:0, maru:0, tel:0, other:0 };
@@ -4287,6 +4395,13 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
     }
   }
 
+  let uniqueSlots = 0;
+  for (let r = 0; r < rowCount; r++) {
+    for (let c = 0; c < maxCols; c++) {
+      if (grid[r][c] && grid[r][c] !== "excluded_notice_big") uniqueSlots += 1;
+    }
+  }
+  out.slots_unique = uniqueSlots;
   const denom = out.total_slots || 0;
   out.other_ratio = denom > 0 ? (out.other / denom) : null;
   out.bell_rate_total = out.total_slots ? (out.bell / out.total_slots) : null;
@@ -4326,7 +4441,8 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
                     stats["suspicious_vendor"] = vendor_value
                     stats["suspicious_excerpt"] = excerpt
                     stats["suspicious_strength"] = strength
-                    if suspicious_hit and not suspicious_dumped:
+                    should_dump = _should_dump_suspicious(stats, suspicious_meta or {}, frame_url=frame_url or getattr(fr, "url", ""))
+                    if should_dump and not suspicious_dumped:
                         suspicious_dumped = True
                         await _dump_suspicious_debug_async(
                             page,
@@ -4883,6 +4999,21 @@ def _delta_report(prev_rows, cur_rows, top_n=5, min_conf=0):
         "cur_rows": len(cur_rows or []),
     }
 
+def _summarize_row_quality(rows: list) -> dict:
+    counts = {"OK": 0, "WARN": 0, "BAD": 0}
+    for r in rows or []:
+        grade = r.get("row_quality_grade")
+        if grade not in counts:
+            conf = int(r.get("site_confidence", 0) or 0)
+            if conf >= _QUALITY_OK_MIN:
+                grade = "OK"
+            elif conf >= _QUALITY_WARN_MIN:
+                grade = "WARN"
+            else:
+                grade = "BAD"
+        counts[grade] += 1
+    return counts
+
 async def async_scrape_job(job, headless: bool, minimize_browser: bool, concurrency: int, nav_limiter: AsyncNavLimiter):
     store_base = store_base_from_list_url(job.url)
     apw, browser, context = await _make_async_context(headless=headless, minimize_browser=minimize_browser)
@@ -5120,28 +5251,19 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
         r["delta_pop"] = calc_delta_popularity(prev_stats, stats)
         r.setdefault("delta", r.get("delta_pop"))
 
-        diag = {
-            "iframe_ok": bool(stats.get("ok")),
-            "time_rows": stats.get("time_rows", 0) or 0,
-            "max_cols": stats.get("max_cols", 0) or 0,
-            "total_slots": stats.get("total_slots", 0) or 0,
-            "td_count": stats.get("td_count", 0) or 0,
-            "expected_total": (stats.get("time_rows", 0) or 0) * (stats.get("max_cols", 0) or 0),
-            "empty_calendar": bool(stats.get("empty_calendar")),
-            "other_ratio": stats.get("other_ratio", None),
-            "suspicious_hit": bool(stats.get("suspicious_hit")),
-            "suspicious_markers_hit": stats.get("suspicious_markers_hit") or [],
-            "suspicious_markers_count": len(stats.get("suspicious_markers_hit") or []),
-            "suspicious_strength": stats.get("suspicious_strength"),
-            "suspicious_vendor": stats.get("suspicious_vendor"),
-            "min_rows": 20,
-            "min_cols": 7,
-            "max_other_ratio": 0.35,
-        }
-        conf, issues = calc_site_confidence(diag)
+        diag = _row_quality_diag_from_stats(
+            stats,
+            frame_url=r.get("frame_url"),
+            parse_errors=r.get("parse_errors") if isinstance(r.get("parse_errors"), list) else None,
+        )
+        conf, grade, reasons, core_missing = _calc_row_quality(diag)
+        r["row_quality_score"] = conf
+        r["row_quality_grade"] = grade
+        r["row_quality_reasons"] = reasons
+        r["row_quality_core_missing"] = core_missing
         r["site_confidence"] = conf
         r.setdefault("conf", r.get("site_confidence"))
-        r["site_issues"] = issues
+        r["site_issues"] = reasons
 
         r["score"] = calc_score(stats, max_bell)
         r["score_model"] = _SCORE_MODEL_NAME
@@ -5320,6 +5442,17 @@ async def run_job(preset_names=None, jobs=None, headless=True, minimize_browser=
         all_rows.extend(rows)
         completed += 1
         log_event("INFO", "job done", preset=job.name, got=len(rows))
+        try:
+            summary = _get_suspicious_dump_summary(_current_run_id(), job.name)
+            log_event(
+                "INFO",
+                "suspicious dump summary",
+                preset=job.name,
+                saved=summary.get("saved", 0),
+                suppressed=summary.get("suppressed", 0),
+            )
+        except Exception:
+            pass
 
     save_run_outputs(run_dir, run_ts, all_rows, force_today=force_today, cfg=cfg)
 
@@ -5376,11 +5509,23 @@ async def run_auto_once(preset_names=None, headless=True, minimize_browser=True,
                     with open(ppath, "r", encoding="utf-8") as r:
                         prev_rows = (json.load(r) or {}).get("all_current", []) or []
 
+            min_conf = int(cfg.get("notify",{}).get("min_confidence", 0) or 0)
             rep = _delta_report(prev_rows, all_rows,
                                 top_n=int(cfg.get("notify",{}).get("top_n", 5) or 5),
-                                min_conf=int(cfg.get("notify",{}).get("min_confidence", 0) or 0))
+                                min_conf=min_conf)
 
-            lines = []
+            quality = _summarize_row_quality(all_rows)
+            total_rows = len(all_rows)
+            adopted_rows = total_rows - int(rep.get("bad_conf_skipped", 0) or 0)
+            run_id = _current_run_id()
+            suspicious_summary = _get_suspicious_dump_summary(run_id)
+            summary_line = (
+                f"抽出:{total_rows}件 OK:{quality['OK']} WARN:{quality['WARN']} BAD:{quality['BAD']} "
+                f"採用:{adopted_rows} 除外:{rep.get('bad_conf_skipped', 0)} "
+                f"(min_conf:{min_conf}) suspicious: 保存{suspicious_summary.get('saved', 0)} / 抑止{suspicious_summary.get('suppressed', 0)}"
+            )
+
+            lines = [summary_line]
             if rep["opens"]:
                 lines.append("開き増（bookable↑）Top:")
                 for _, dbook, r in rep["opens"]:
@@ -5393,11 +5538,11 @@ async def run_auto_once(preset_names=None, headless=True, minimize_browser=True,
                     nm = r.get("name","")
                     pr = r.get("preset","")
                     lines.append(f" {db:+d}  {pr} {nm}")
-            if rep["bad_conf_skipped"]:
-                lines.append(f"低Confidenceでスキップ: {rep['bad_conf_skipped']}件")
+            if not rep["opens"] and not rep["fills"]:
+                lines.append("変化なし")
 
             title = f"予約スナップショット {today}"
-            body = "\n".join(lines) if lines else "変化なし（またはConfidence不足）"
+            body = "\n".join(lines)
             notify_windows(title, body)
             log_event("INFO", "notify", title=title, body_preview=body[:180])
         except Exception as e:
