@@ -95,8 +95,9 @@ _SUSPICIOUS_DUMP_PRESET_COUNTS = {}
 _SUSPICIOUS_DUMP_STATS = {}
 _SUSPICIOUS_DUMP_LOCK = threading.Lock()
 _SUSPICIOUS_MARKERS = (
-    {"label": "cloudflare", "token": "cloudflare", "vendor": "cloudflare", "strength": "strong"},
     {"label": "cf-chl", "token": "cf-chl", "vendor": "cloudflare", "strength": "strong"},
+    {"label": "cf-turnstile", "token": "cf-turnstile", "vendor": "cloudflare", "strength": "strong"},
+    {"label": "challenges.cloudflare.com", "token": "challenges.cloudflare.com", "vendor": "cloudflare", "strength": "strong"},
     {"label": "turnstile", "token": "turnstile", "vendor": "turnstile", "strength": "strong"},
     {"label": "hcaptcha", "token": "hcaptcha", "vendor": "hcaptcha", "strength": "strong"},
     {"label": "recaptcha", "token": "recaptcha", "vendor": "recaptcha", "strength": "weak"},
@@ -119,6 +120,127 @@ _SUSPICIOUS_MARKERS = (
         "strength": "strong",
     },
 )
+
+_SUSPICIOUS_LIGHT_TITLE_TOKENS = (
+    "attention required",
+    "just a moment",
+    "verify you are human",
+    "access denied",
+)
+_SUSPICIOUS_LIGHT_PROBE_MAX_CHARS = 80000
+_SUSPICIOUS_LIGHT_SELECTORS = (
+    ("cf_challenge_iframe", "iframe[src*='challenges.cloudflare.com']", "cloudflare"),
+    ("cf_turnstile", "[name='cf-turnstile-response']", "cloudflare"),
+    ("cf_challenge_dom", "#cf-challenge", "cloudflare"),
+    ("recaptcha", "iframe[src*='recaptcha']", "recaptcha"),
+    ("hcaptcha", "iframe[src*='hcaptcha']", "hcaptcha"),
+)
+
+def _probe_suspicious_selectors_sync(page, fr):
+    for label, selector, vendor in _SUSPICIOUS_LIGHT_SELECTORS:
+        try:
+            if page.query_selector(selector):
+                return label, vendor
+        except Exception:
+            pass
+        if fr:
+            try:
+                if fr.query_selector(selector):
+                    return label, vendor
+            except Exception:
+                pass
+    return None, None
+
+async def _probe_suspicious_selectors_async(page, fr):
+    for label, selector, vendor in _SUSPICIOUS_LIGHT_SELECTORS:
+        try:
+            if await page.query_selector(selector):
+                return label, vendor
+        except Exception:
+            pass
+        if fr:
+            try:
+                if await fr.query_selector(selector):
+                    return label, vendor
+            except Exception:
+                pass
+    return None, None
+
+def _probe_suspicious_title_sync(page):
+    try:
+        title = (page.title() or "").strip()
+    except Exception:
+        title = ""
+    lower = title.lower()
+    for token in _SUSPICIOUS_LIGHT_TITLE_TOKENS:
+        if token in lower:
+            return token
+    return ""
+
+async def _probe_suspicious_title_async(page):
+    try:
+        title = (await page.title()) or ""
+    except Exception:
+        title = ""
+    lower = title.strip().lower()
+    for token in _SUSPICIOUS_LIGHT_TITLE_TOKENS:
+        if token in lower:
+            return token
+    return ""
+
+def _probe_suspicious_snippet_sync(target):
+    try:
+        return target.evaluate(
+            f"""() => {{
+  const el = document.documentElement;
+  if (!el) return "";
+  const html = el.outerHTML || "";
+  return html.slice(0, {_SUSPICIOUS_LIGHT_PROBE_MAX_CHARS});
+}}"""
+        )
+    except Exception:
+        return ""
+
+async def _probe_suspicious_snippet_async(target):
+    try:
+        return await target.evaluate(
+            f"""() => {{
+  const el = document.documentElement;
+  if (!el) return "";
+  const html = el.outerHTML || "";
+  return html.slice(0, {_SUSPICIOUS_LIGHT_PROBE_MAX_CHARS});
+}}"""
+        )
+    except Exception:
+        return ""
+
+def _light_probe_suspicious_sync(page, fr):
+    label, vendor = _probe_suspicious_selectors_sync(page, fr)
+    if label:
+        return {"hit": True, "label": label, "vendor": vendor, "strength": "strong"}
+    title_token = _probe_suspicious_title_sync(page)
+    if title_token:
+        return {"hit": True, "label": f"title:{title_token}", "vendor": None, "strength": "strong"}
+    page_snip = _probe_suspicious_snippet_sync(page)
+    frame_snip = _probe_suspicious_snippet_sync(fr) if fr else ""
+    detect = _detect_suspicious_markers(page_snip, frame_snip)
+    if detect.get("suspicious_hit"):
+        return {"hit": True, "label": "snippet", "vendor": None, "strength": detect.get("strength") or "weak"}
+    return {"hit": False}
+
+async def _light_probe_suspicious_async(page, fr):
+    label, vendor = await _probe_suspicious_selectors_async(page, fr)
+    if label:
+        return {"hit": True, "label": label, "vendor": vendor, "strength": "strong"}
+    title_token = await _probe_suspicious_title_async(page)
+    if title_token:
+        return {"hit": True, "label": f"title:{title_token}", "vendor": None, "strength": "strong"}
+    page_snip = await _probe_suspicious_snippet_async(page)
+    frame_snip = await _probe_suspicious_snippet_async(fr) if fr else ""
+    detect = _detect_suspicious_markers(page_snip, frame_snip)
+    if detect.get("suspicious_hit"):
+        return {"hit": True, "label": "snippet", "vendor": None, "strength": detect.get("strength") or "weak"}
+    return {"hit": False}
 
 def _probe_login_like_iframe_sync(page):
     iframe_src = ""
@@ -1894,11 +2016,32 @@ def _count_calendar_stats_by_slots_core(page, stop_evt: threading.Event, progres
                 page_html = ""
                 frame_html = ""
                 try:
-                    page_html = (page.content() or "")
-                    frame_html = (fr.content() or "")
-                    detect = _detect_suspicious_markers(page_html, frame_html)
-                    suspicious_hit = bool(detect.get("suspicious_hit"))
-                    suspicious_meta = detect
+                    probe = _light_probe_suspicious_sync(page, fr)
+                    if probe.get("hit"):
+                        page_html = (page.content() or "")
+                        frame_html = (fr.content() or "")
+                        detect = _detect_suspicious_markers(page_html, frame_html)
+                        if detect.get("suspicious_hit"):
+                            suspicious_hit = True
+                            suspicious_meta = detect
+                        else:
+                            suspicious_hit = True
+                            suspicious_meta = {
+                                "suspicious_hit": True,
+                                "markers_hit": [probe.get("label")] if probe.get("label") else [],
+                                "vendors": [probe.get("vendor")] if probe.get("vendor") else [],
+                                "strength": probe.get("strength"),
+                                "excerpt": "",
+                            }
+                    else:
+                        suspicious_hit = False
+                        suspicious_meta = {
+                            "suspicious_hit": False,
+                            "markers_hit": [],
+                            "vendors": [],
+                            "strength": None,
+                            "excerpt": "",
+                        }
                 except Exception:
                     pass
                 if isinstance(stats, dict):
@@ -3398,6 +3541,12 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
     - global_summary.json   : 履歴全体の概況（軽量）
     """
     ensure_data_dirs()
+    def _safe_float(v, default=0.0):
+        try:
+            return float(v)
+        except Exception:
+            return default
+
     # runサマリ（軽量）
     try:
         suspicious = 0
@@ -3412,10 +3561,20 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
             scores.append(float(r.get("score", 0) or 0))
             bigs.append(float(r.get("big_score", r.get("score",0)) or 0))
 
+        rows = all_rows if isinstance(all_rows, list) else []
+        sorted_rows = sorted(
+            rows,
+            key=lambda r: (
+                -_safe_float(r.get("score")),
+                -_safe_float(r.get("delta")),
+                -_safe_float(r.get("site_confidence")),
+                str(r.get("name") or ""),
+            ),
+        )
         summary = {
             "run_ts": run_ts,
             "run_dir": os.path.basename(run_dir or ""),
-            "rows": len(all_rows),
+            "rows": len(rows),
             "suspicious_rows": suspicious,
             "avg_confidence": (sum(confs) / len(confs)) if confs else None,
             "avg_score": (sum(scores) / len(scores)) if scores else None,
@@ -3432,7 +3591,7 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
                     "maru": (r.get("stats",{}) or {}).get("maru"),
                     "tel": (r.get("stats",{}) or {}).get("tel"),
                 }
-                for r in (all_rows[:10] if isinstance(all_rows, list) else [])
+                for r in sorted_rows[:10]
             ],
         }
         _atomic_write_json(os.path.join(ANALYTICS_DIR, "last_run_summary.json"), summary)
@@ -4416,11 +4575,32 @@ async def _count_calendar_stats_by_slots_async_core(page, max_wait_ms: int = Non
                 page_html = ""
                 frame_html = ""
                 try:
-                    page_html = (await page.content()) or ""
-                    frame_html = (await fr.content()) or ""
-                    detect = _detect_suspicious_markers(page_html, frame_html)
-                    suspicious_hit = bool(detect.get("suspicious_hit"))
-                    suspicious_meta = detect
+                    probe = await _light_probe_suspicious_async(page, fr)
+                    if probe.get("hit"):
+                        page_html = (await page.content()) or ""
+                        frame_html = (await fr.content()) or ""
+                        detect = _detect_suspicious_markers(page_html, frame_html)
+                        if detect.get("suspicious_hit"):
+                            suspicious_hit = True
+                            suspicious_meta = detect
+                        else:
+                            suspicious_hit = True
+                            suspicious_meta = {
+                                "suspicious_hit": True,
+                                "markers_hit": [probe.get("label")] if probe.get("label") else [],
+                                "vendors": [probe.get("vendor")] if probe.get("vendor") else [],
+                                "strength": probe.get("strength"),
+                                "excerpt": "",
+                            }
+                    else:
+                        suspicious_hit = False
+                        suspicious_meta = {
+                            "suspicious_hit": False,
+                            "markers_hit": [],
+                            "vendors": [],
+                            "strength": None,
+                            "excerpt": "",
+                        }
                 except Exception:
                     pass
                 if isinstance(stats, dict):
