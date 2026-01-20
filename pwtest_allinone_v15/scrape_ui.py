@@ -1652,10 +1652,13 @@ class App(tk.Tk):
                     hist = []
                 big_score, detail = _calc_bigdata_score_detail(r.get("stats", {}), hist, cur_stats_by_date=stats_by_date)
                 r["big_score"] = big_score
+                r["big_score_old"] = detail.get("big_score_old")
+                r["bd_detail"] = detail
                 r["bd_level"] = detail.get("bd_level")
                 r["bd_trust"] = detail.get("bd_trust")
                 r["bd_days"] = detail.get("bd_days")
                 r["bd_model"] = _BD_MODEL_NAME
+                r["bd_model_version"] = detail.get("bd_model_version")
             except Exception:
                 r["big_score"] = r.get("score",0)
 
@@ -1671,11 +1674,13 @@ class App(tk.Tk):
                         "name": r.get("name",""),
                         "score": r.get("score",0),
                         "big_score": r.get("big_score", r.get("score",0)),
+                        "big_score_old": r.get("big_score_old"),
                         "delta": r.get("delta"),
                         "site_confidence": r.get("site_confidence",0),
                         "stats": r.get("stats",{}),
                         "stats_by_date": stats_by_date,
                         "bd_model": r.get("bd_model"),
+                        "bd_model_version": r.get("bd_model_version"),
                         "bd_level": r.get("bd_level"),
                         "bd_trust": r.get("bd_trust"),
                         "bd_days": r.get("bd_days"),
@@ -1691,6 +1696,7 @@ class App(tk.Tk):
                 "stats": r.get("stats",{}),
                 "score": r.get("score",0),
                 "big_score": r.get("big_score", r.get("score",0)),
+                "big_score_old": r.get("big_score_old"),
                 "site_confidence": r.get("site_confidence",0),
             }
             if gid:

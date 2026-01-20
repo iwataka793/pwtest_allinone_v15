@@ -2489,7 +2489,7 @@ def count_calendar_stats_by_slots(page, stop_evt: threading.Event, progress_cb=N
 # -------------------------
 _SCORE_PARAMS_CACHE = None
 _SCORE_MODEL_NAME = "v2_fill_evidence"
-_BD_MODEL_NAME = "v3_bd_by_service_date"
+_BD_MODEL_NAME = "v4_bd_fill_volume_decay"
 
 def _get_score_params():
     global _SCORE_PARAMS_CACHE
@@ -2499,10 +2499,18 @@ def _get_score_params():
         bell_sat = float(score_cfg.get("bell_sat", 18) or 18)
         trust_day_sat = float(score_cfg.get("trust_day_sat", score_cfg.get("bd_day_sat", 18)) or 18)
         bd_day_sat = float(score_cfg.get("bd_day_sat", 14) or 14)
+        bd_total_sat = float(score_cfg.get("bd_total_sat", 40) or 40)
+        bd_half_life = float(score_cfg.get("bd_half_life", 28) or 28)
+        bd_prior_bell = float(score_cfg.get("bd_prior_bell", 1.0) or 1.0)
+        bd_prior_open = float(score_cfg.get("bd_prior_open", 1.0) or 1.0)
         _SCORE_PARAMS_CACHE = {
             "bell_sat": bell_sat if bell_sat > 0 else 18,
             "trust_day_sat": trust_day_sat if trust_day_sat > 0 else 18,
             "bd_day_sat": bd_day_sat if bd_day_sat > 0 else 14,
+            "bd_total_sat": bd_total_sat if bd_total_sat > 0 else 40,
+            "bd_half_life": bd_half_life if bd_half_life > 0 else 28,
+            "bd_prior_bell": bd_prior_bell if bd_prior_bell > 0 else 1.0,
+            "bd_prior_open": bd_prior_open if bd_prior_open > 0 else 1.0,
         }
     return _SCORE_PARAMS_CACHE
 
@@ -3356,20 +3364,7 @@ def _percentile_of(value: float, arr):
             lo += 1
     return lo / max(1, len(s))
 
-def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict = None):
-    """
-    ビッグデータ版スコア（0.0〜1.0）
-    - サービス日(YYYY-MM-DD)ごとの“ユニーク日付系列”からMAを作る
-    - 同一サービス日が複数観測されても、最新の観測(<=サービス日)だけ採用
-    - Confidence（サイト信頼度）は別軸なので、ここでは加点しない
-    """
-    params = _get_score_params()
-    bell_sat = params.get("bell_sat", 18)
-    trust_day_sat = params.get("trust_day_sat", 18)
-    cfg = load_config()
-    score_cfg = cfg.get("score", {}) if isinstance(cfg.get("score"), dict) else {}
-    min_conf = int(score_cfg.get("bd_input_min_confidence", 0) or 0)
-
+def _collect_service_date_series(cur_stats: dict, hist: list, cur_stats_by_date: dict, min_conf: int):
     def _parse_iso_date(val):
         if not val:
             return None
@@ -3442,7 +3437,6 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
         for dkey, st in cur_stats_by_date.items():
             service_date = _parse_iso_date(dkey)
             _update_best(best, service_date, today, st)
-    cur_stats_v2 = score_v2(cur_stats or {}, bell_sat=bell_sat)
     if not best:
         _update_best(best, today, today, cur_stats or {})
 
@@ -3467,12 +3461,27 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
                 _update_best(best, obs_date, obs_date, st)
 
     series = sorted(best.values(), key=lambda x: x.get("service_date") or today, reverse=True)
+    return series, obs_dates
+
+def _calc_bigdata_score_detail_legacy_v3(cur_stats: dict, hist: list, cur_stats_by_date: dict = None):
+    """
+    旧BD（v3）ロジック：互換用
+    """
+    params = _get_score_params()
+    bell_sat = params.get("bell_sat", 18)
+    trust_day_sat = params.get("trust_day_sat", 18)
+    cfg = load_config()
+    score_cfg = cfg.get("score", {}) if isinstance(cfg.get("score"), dict) else {}
+    min_conf = int(score_cfg.get("bd_input_min_confidence", 0) or 0)
+
+    series, obs_dates = _collect_service_date_series(cur_stats, hist, cur_stats_by_date, min_conf)
+    today = datetime.date.today()
     series_desc = [
         score_v2({"bell": s.get("bell"), "maru": s.get("maru"), "tel": s.get("tel")}, bell_sat=bell_sat)
         for s in series
     ]
     if not series_desc:
-        series_desc = [cur_stats_v2]
+        series_desc = [score_v2(cur_stats or {}, bell_sat=bell_sat)]
 
     def _ma(window):
         if not series_desc:
@@ -3534,6 +3543,130 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
         "ma84": ma84,
         "ma112": ma112,
         "unique_dates": [s.get("service_date").isoformat() for s in series if s.get("service_date")],
+    }
+    return big_score, detail
+
+def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict = None):
+    """
+    ビッグデータ版スコア（0.0〜1.0）
+    - サービス日(YYYY-MM-DD)ごとの“ユニーク日付系列”から最新データだけ採用
+    - bell/(bell+maru+tel) を平滑化して長期の埋まりを評価
+    - 観測量は飽和関数で頭打ちし、古いデータは減衰させる
+    - Confidence（サイト信頼度）は別軸なので、ここでは加点しない
+    """
+    params = _get_score_params()
+    cfg = load_config()
+    score_cfg = cfg.get("score", {}) if isinstance(cfg.get("score"), dict) else {}
+    min_conf = int(score_cfg.get("bd_input_min_confidence", 0) or 0)
+    total_sat = float(params.get("bd_total_sat", 40) or 40)
+    half_life = float(params.get("bd_half_life", 28) or 28)
+    prior_bell = float(params.get("bd_prior_bell", 1.0) or 1.0)
+    prior_open = float(params.get("bd_prior_open", 1.0) or 1.0)
+
+    series, obs_dates = _collect_service_date_series(cur_stats, hist, cur_stats_by_date, min_conf)
+    today = datetime.date.today()
+    max_window = 112
+    series = series[:max_window]
+
+    entries = []
+    for idx, s in enumerate(series):
+        bell = int(s.get("bell", 0) or 0)
+        maru = int(s.get("maru", 0) or 0)
+        tel = int(s.get("tel", 0) or 0)
+        total = bell + maru + tel
+        if total <= 0:
+            continue
+        smooth_fill = (bell + prior_bell) / (total + prior_bell + prior_open)
+        age = float(idx)
+        weight = math.exp(-age / half_life) if half_life > 0 else 1.0
+        entries.append({
+            "service_date": s.get("service_date") or today,
+            "bell": bell,
+            "maru": maru,
+            "tel": tel,
+            "total": total,
+            "fill": smooth_fill,
+            "weight": weight,
+        })
+
+    if not entries:
+        bell = int((cur_stats or {}).get("bell", 0) or 0)
+        maru = int((cur_stats or {}).get("maru", 0) or 0)
+        tel = int((cur_stats or {}).get("tel", 0) or 0)
+        total = bell + maru + tel
+        smooth_fill = (bell + prior_bell) / (total + prior_bell + prior_open) if total > 0 else 0.0
+        entries.append({
+            "service_date": today,
+            "bell": bell,
+            "maru": maru,
+            "tel": tel,
+            "total": total,
+            "fill": smooth_fill,
+            "weight": 1.0,
+        })
+
+    def _calc_window_stats(window):
+        subset = entries[:min(int(window), len(entries))]
+        if not subset:
+            return None, None
+        wsum = sum(e["weight"] for e in subset) or 0.0
+        fill_sum = sum(e["fill"] * e["weight"] for e in subset)
+        total_sum = sum(e["total"] * e["weight"] for e in subset)
+        fill_avg = (fill_sum / wsum) if wsum > 0 else None
+        volume = total_sum
+        return fill_avg, volume
+
+    fill_avg, weighted_total = _calc_window_stats(len(entries))
+    if fill_avg is None:
+        fill_avg = 0.0
+    if weighted_total is None:
+        weighted_total = 0.0
+
+    volume_factor = 1.0 - math.exp(-weighted_total / float(total_sat)) if total_sat > 0 else 1.0
+    base = float(fill_avg or 0.0)
+    big_score = _clamp01(base * volume_factor)
+
+    ma3, _ = _calc_window_stats(3)
+    ma14, _ = _calc_window_stats(14)
+    ma28, _ = _calc_window_stats(28)
+    ma56, _ = _calc_window_stats(56)
+    ma84, _ = _calc_window_stats(84)
+    ma112, _ = _calc_window_stats(112)
+
+    n_service = len(series)
+    n_obs = len(obs_dates)
+    old_score, old_detail = _calc_bigdata_score_detail_legacy_v3(cur_stats, hist, cur_stats_by_date=cur_stats_by_date)
+
+    detail = {
+        "big_score": big_score,
+        "big_score_old": old_score,
+        "bd_model_version": _BD_MODEL_NAME,
+        "bd_level": base,
+        "bd_trust": volume_factor,
+        "bd_volume_factor": volume_factor,
+        "bd_total_weighted": weighted_total,
+        "bd_total_sat": total_sat,
+        "bd_half_life": half_life,
+        "bd_prior_bell": prior_bell,
+        "bd_prior_open": prior_open,
+        "bd_days": n_service,
+        "bd_window": min(max_window, n_service) if n_service else None,
+        "bd_service_days": n_service,
+        "bd_obs_days": n_obs,
+        "ma3": ma3,
+        "ma14": ma14,
+        "ma28": ma28,
+        "ma56": ma56,
+        "ma84": ma84,
+        "ma112": ma112,
+        "unique_dates": [s.get("service_date").isoformat() for s in series if s.get("service_date")],
+        "legacy_detail": {
+            "bd_level": old_detail.get("bd_level"),
+            "bd_trust": old_detail.get("bd_trust"),
+            "bd_window": old_detail.get("bd_window"),
+            "bd_service_days": old_detail.get("bd_service_days"),
+            "bd_obs_days": old_detail.get("bd_obs_days"),
+        },
     }
     return big_score, detail
 
@@ -5465,6 +5598,8 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                 hist = []
             big_score, detail = _calc_bigdata_score_detail(stats, hist, cur_stats_by_date=stats_by_date)
             r["big_score"] = big_score
+            r["big_score_old"] = detail.get("big_score_old")
+            r["bd_detail"] = detail
             r["bd_level"] = detail.get("bd_level")
             r["bd_trust"] = detail.get("bd_trust")
             r["bd_days"] = detail.get("bd_days")
@@ -5472,6 +5607,7 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
             r["bd_service_days"] = detail.get("bd_service_days")
             r["bd_obs_days"] = detail.get("bd_obs_days")
             r["bd_model"] = _BD_MODEL_NAME
+            r["bd_model_version"] = detail.get("bd_model_version")
         except Exception as e:
             r["big_score"] = r.get("score",0)
             log_event("WARN", "calc_bigdata_score failed", preset=job.name, gid=gid, err=str(e)[:200])
@@ -5486,8 +5622,10 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "name": r.get("name",""),
                     "score": r.get("score",0),
                     "big_score": r.get("big_score", r.get("score",0)),
+                    "big_score_old": r.get("big_score_old"),
                     "score_model": _SCORE_MODEL_NAME,
                     "bd_model": r.get("bd_model"),
+                    "bd_model_version": r.get("bd_model_version"),
                     "bd_level": r.get("bd_level"),
                     "bd_trust": r.get("bd_trust"),
                     "bd_days": r.get("bd_days"),
@@ -5513,6 +5651,7 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "stats_by_date": stats_by_date,
                     "score": r.get("score"),
                     "big_score": r.get("big_score"),
+                    "big_score_old": r.get("big_score_old"),
                     "bd_window": r.get("bd_window"),
                 })
             except Exception as e:
@@ -5748,7 +5887,7 @@ async def run_auto_once(preset_names=None, headless=True, minimize_browser=True,
 def _debug_score_print():
     params = _get_score_params()
     bell_sat = params.get("bell_sat", 18)
-    trust_day_sat = params.get("trust_day_sat", 18)
+    bd_total_sat = params.get("bd_total_sat", 40)
 
     def _score_of(bell, maru, tel):
         return score_v2({"bell": bell, "maru": maru, "tel": tel}, bell_sat=bell_sat)
@@ -5757,24 +5896,16 @@ def _debug_score_print():
     score_b = _score_of(39, 0, 0)
     score_c = _score_of(40, 40, 0)
 
-    def _bd_for_days(days, base_score=0.9):
-        if trust_day_sat <= 0:
-            day_factor = 1.0
-        else:
-            day_factor = 1.0 - math.exp(-days / float(trust_day_sat))
-        return _clamp01(base_score * day_factor)
+    def _volume_factor(total):
+        return 1.0 - math.exp(-total / float(bd_total_sat)) if bd_total_sat > 0 else 1.0
 
-    bd3 = _bd_for_days(3)
-    bd14 = _bd_for_days(14)
-    bd56 = _bd_for_days(56)
-
-    print("[debug-score] params:", f"bell_sat={bell_sat}", f"trust_day_sat={trust_day_sat}")
+    print("[debug-score] params:", f"bell_sat={bell_sat}", f"bd_total_sat={bd_total_sat}")
     print("[debug-score] A bell=40 maru=0 tel=0 ->", f"{score_a:.6f}")
     print("[debug-score] B bell=39 maru=0 tel=0 ->", f"{score_b:.6f}")
     print("[debug-score] C bell=40 maru=40 tel=0 ->", f"{score_c:.6f}")
-    print("[debug-score] BD score=0.9 for days=3 ->", f"{bd3:.6f}")
-    print("[debug-score] BD score=0.9 for days=14 ->", f"{bd14:.6f}")
-    print("[debug-score] BD score=0.9 for days=56 ->", f"{bd56:.6f}")
+    print("[debug-score] BD volume factor total=10 ->", f"{_volume_factor(10):.6f}")
+    print("[debug-score] BD volume factor total=40 ->", f"{_volume_factor(40):.6f}")
+    print("[debug-score] BD volume factor total=200 ->", f"{_volume_factor(200):.6f}")
 
 def _debug_bd_print():
     today = datetime.date.today()
@@ -5801,7 +5932,7 @@ def _debug_bd_print():
     _, detail = _calc_bigdata_score_detail({"bell": 9, "maru": 1, "tel": 0}, hist, cur_stats_by_date=cur_stats_by_date)
     print("[debug-bd] unique_dates:", detail.get("unique_dates"))
     print("[debug-bd] days:", detail.get("bd_days"), "window:", detail.get("bd_window"), "service_days:", detail.get("bd_service_days"), "obs_days:", detail.get("bd_obs_days"))
-    print("[debug-bd] level:", f"{detail.get('bd_level', 0):.6f}", "trust:", f"{detail.get('bd_trust', 0):.6f}", "big_score:", f"{detail.get('big_score', 0):.6f}")
+    print("[debug-bd] level:", f"{detail.get('bd_level', 0):.6f}", "volume:", f"{detail.get('bd_volume_factor', 0):.6f}", "big_score:", f"{detail.get('big_score', 0):.6f}")
     print("[debug-bd] ma28/ma56/ma84/ma112:", f"{detail.get('ma28')}", f"{detail.get('ma56')}", f"{detail.get('ma84')}", f"{detail.get('ma112')}")
 
 if __name__ == "__main__":
