@@ -2490,6 +2490,7 @@ def count_calendar_stats_by_slots(page, stop_evt: threading.Event, progress_cb=N
 _SCORE_PARAMS_CACHE = None
 _SCORE_MODEL_NAME = "v2_fill_evidence"
 _BD_MODEL_NAME = "v4_bd_fill_volume_decay"
+_RANK_MODEL_NAME = "rank_v1_quality_momentum"
 
 def _get_score_params():
     global _SCORE_PARAMS_CACHE
@@ -2513,6 +2514,39 @@ def _get_score_params():
             "bd_prior_open": bd_prior_open if bd_prior_open > 0 else 1.0,
         }
     return _SCORE_PARAMS_CACHE
+
+_RANK_PARAMS_CACHE = None
+
+def _get_rank_params():
+    global _RANK_PARAMS_CACHE
+    if _RANK_PARAMS_CACHE is None:
+        cfg = load_config()
+        rank_cfg = cfg.get("rank", {}) if isinstance(cfg, dict) else {}
+        quality_half_life = float(rank_cfg.get("quality_half_life", 60) or 60)
+        momentum_half_life = float(rank_cfg.get("momentum_half_life", 14) or 14)
+        momentum_bell_sat = float(rank_cfg.get("momentum_bell_sat", 20) or 20)
+        quality_prior_bell = float(rank_cfg.get("quality_prior_bell", 1.0) or 1.0)
+        quality_prior_open = float(rank_cfg.get("quality_prior_open", 1.0) or 1.0)
+        zero_total_weight = float(rank_cfg.get("zero_total_weight", 0.35) or 0.35)
+        rank_momentum_base = float(rank_cfg.get("rank_momentum_base", 0.2) or 0.2)
+        quality_power = float(rank_cfg.get("quality_power", 1.0) or 1.0)
+        momentum_power = float(rank_cfg.get("momentum_power", 1.0) or 1.0)
+        max_window = int(rank_cfg.get("rank_max_window", 112) or 112)
+        min_conf = int(rank_cfg.get("rank_input_min_confidence", 0) or 0)
+        _RANK_PARAMS_CACHE = {
+            "quality_half_life": quality_half_life if quality_half_life > 0 else 60,
+            "momentum_half_life": momentum_half_life if momentum_half_life > 0 else 14,
+            "momentum_bell_sat": momentum_bell_sat if momentum_bell_sat > 0 else 20,
+            "quality_prior_bell": quality_prior_bell if quality_prior_bell > 0 else 1.0,
+            "quality_prior_open": quality_prior_open if quality_prior_open > 0 else 1.0,
+            "zero_total_weight": zero_total_weight if zero_total_weight > 0 else 0.35,
+            "rank_momentum_base": max(0.0, min(rank_momentum_base, 1.0)),
+            "quality_power": quality_power if quality_power > 0 else 1.0,
+            "momentum_power": momentum_power if momentum_power > 0 else 1.0,
+            "rank_max_window": max(1, max_window),
+            "rank_input_min_confidence": max(0, min_conf),
+        }
+    return _RANK_PARAMS_CACHE
 
 def _clamp01(value: float) -> float:
     if value < 0.0:
@@ -3105,6 +3139,7 @@ def build_history_summary(all_rows: list, run_ts: str, run_dir: str):
 
 def save_run_outputs(run_dir: str, run_ts: str, all_rows: list, force_today: bool=False, cfg: dict=None):
     cfg = cfg or {}
+    _assign_rank_percentiles(all_rows or [])
     write_run_file(run_dir, "all_current.json", all_rows if all_rows is not None else [])
     try:
         build_analytics(all_rows or [], run_ts, run_dir)
@@ -3364,7 +3399,7 @@ def _percentile_of(value: float, arr):
             lo += 1
     return lo / max(1, len(s))
 
-def _collect_service_date_series(cur_stats: dict, hist: list, cur_stats_by_date: dict, min_conf: int):
+def _collect_service_date_series(cur_stats: dict, hist: list, cur_stats_by_date: dict, min_conf: int, include_zero: bool=False):
     def _parse_iso_date(val):
         if not val:
             return None
@@ -3409,7 +3444,7 @@ def _collect_service_date_series(cur_stats: dict, hist: list, cur_stats_by_date:
         bell = int((st or {}).get("bell", 0) or 0)
         maru = int((st or {}).get("maru", 0) or 0)
         tel = int((st or {}).get("tel", 0) or 0)
-        if bell + maru + tel <= 0:
+        if bell + maru + tel <= 0 and not include_zero:
             return
         key = service_date.isoformat()
         prev = best.get(key)
@@ -3670,6 +3705,135 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
     }
     return big_score, detail
 
+def _calc_rank_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict = None):
+    """
+    ランキング向けスコア（Quality + Momentum）
+    - Quality: 長期の埋まり率（bell / (bell+maru+tel)）を減衰平均
+    - Momentum: 直近のベル量を減衰 + 飽和で評価
+    - 0観測は弱い重みでQualityを下げる方向へ寄与
+    """
+    params = _get_rank_params()
+    min_conf = int(params.get("rank_input_min_confidence", 0) or 0)
+    quality_half_life = float(params.get("quality_half_life", 60) or 60)
+    momentum_half_life = float(params.get("momentum_half_life", 14) or 14)
+    momentum_bell_sat = float(params.get("momentum_bell_sat", 20) or 20)
+    prior_bell = float(params.get("quality_prior_bell", 1.0) or 1.0)
+    prior_open = float(params.get("quality_prior_open", 1.0) or 1.0)
+    zero_total_weight = float(params.get("zero_total_weight", 0.35) or 0.35)
+    rank_momentum_base = float(params.get("rank_momentum_base", 0.2) or 0.2)
+    quality_power = float(params.get("quality_power", 1.0) or 1.0)
+    momentum_power = float(params.get("momentum_power", 1.0) or 1.0)
+    max_window = int(params.get("rank_max_window", 112) or 112)
+
+    series, obs_dates = _collect_service_date_series(cur_stats, hist, cur_stats_by_date, min_conf, include_zero=True)
+    today = datetime.date.today()
+    series = series[:max_window]
+
+    entries = []
+    for idx, s in enumerate(series):
+        bell = int(s.get("bell", 0) or 0)
+        maru = int(s.get("maru", 0) or 0)
+        tel = int(s.get("tel", 0) or 0)
+        total = bell + maru + tel
+        obs_date = s.get("obs_date")
+        if isinstance(obs_date, datetime.datetime):
+            obs_date = obs_date.date()
+        if isinstance(obs_date, datetime.date):
+            age = (today - obs_date).days
+            if age < 0:
+                age = 0
+        else:
+            age = int(idx)
+
+        if total > 0:
+            fill = (bell + prior_bell) / (total + prior_bell + prior_open)
+            weight = math.exp(-age / quality_half_life) if quality_half_life > 0 else 1.0
+        else:
+            fill = 0.0
+            weight = (math.exp(-age / quality_half_life) if quality_half_life > 0 else 1.0) * zero_total_weight
+
+        momentum_weight = math.exp(-age / momentum_half_life) if momentum_half_life > 0 else 1.0
+
+        entries.append({
+            "bell": bell,
+            "maru": maru,
+            "tel": tel,
+            "total": total,
+            "fill": fill,
+            "quality_weight": weight,
+            "momentum_weight": momentum_weight,
+            "age": age,
+        })
+
+    if not entries:
+        bell = int((cur_stats or {}).get("bell", 0) or 0)
+        maru = int((cur_stats or {}).get("maru", 0) or 0)
+        tel = int((cur_stats or {}).get("tel", 0) or 0)
+        total = bell + maru + tel
+        fill = (bell + prior_bell) / (total + prior_bell + prior_open) if total > 0 else 0.0
+        entries.append({
+            "bell": bell,
+            "maru": maru,
+            "tel": tel,
+            "total": total,
+            "fill": fill,
+            "quality_weight": 1.0,
+            "momentum_weight": 1.0,
+            "age": 0,
+        })
+
+    quality_wsum = sum(e["quality_weight"] for e in entries) or 0.0
+    quality_num = sum(e["fill"] * e["quality_weight"] for e in entries) if quality_wsum > 0 else 0.0
+    quality = (quality_num / quality_wsum) if quality_wsum > 0 else 0.0
+
+    momentum_bell = sum(e["bell"] * e["momentum_weight"] for e in entries)
+    momentum = 1.0 - math.exp(-momentum_bell / float(momentum_bell_sat)) if momentum_bell_sat > 0 else 0.0
+
+    quality = _clamp01(quality)
+    momentum = _clamp01(momentum)
+
+    rank_raw = (quality ** quality_power) * (rank_momentum_base + (1.0 - rank_momentum_base) * (momentum ** momentum_power))
+    rank_raw = _clamp01(rank_raw)
+
+    detail = {
+        "rank_model_version": _RANK_MODEL_NAME,
+        "quality_score": quality,
+        "momentum_score": momentum,
+        "rank_score_raw": rank_raw,
+        "quality_half_life": quality_half_life,
+        "momentum_half_life": momentum_half_life,
+        "momentum_bell_sat": momentum_bell_sat,
+        "quality_prior_bell": prior_bell,
+        "quality_prior_open": prior_open,
+        "zero_total_weight": zero_total_weight,
+        "rank_momentum_base": rank_momentum_base,
+        "quality_power": quality_power,
+        "momentum_power": momentum_power,
+        "rank_max_window": max_window,
+        "rank_service_days": len(series),
+        "rank_obs_days": len(obs_dates),
+        "rank_weighted_bell": momentum_bell,
+        "rank_weighted_quality_sum": quality_wsum,
+    }
+    return rank_raw, detail
+
+def _assign_rank_percentiles(rows: list, score_key: str = "rank_score_raw", percentile_key: str = "rank_percentile"):
+    scores = []
+    for row in rows or []:
+        val = row.get(score_key) if isinstance(row, dict) else None
+        if isinstance(val, (int, float)):
+            scores.append(float(val))
+    if not scores:
+        return
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        val = row.get(score_key)
+        if isinstance(val, (int, float)):
+            row[percentile_key] = _percentile_of(float(val), scores)
+        else:
+            row[percentile_key] = None
+
 def calc_bigdata_score(cur_score: float, cur_stats: dict, hist: list, cur_stats_by_date: dict = None):
     _, detail = _calc_bigdata_score_detail(cur_stats, hist, cur_stats_by_date=cur_stats_by_date)
     return detail.get("big_score", 0.0)
@@ -3693,6 +3857,9 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
         confs = []
         scores = []
         bigs = []
+        ranks = []
+        qualities = []
+        momenta = []
         for r in all_rows:
             st = r.get("stats", {}) or {}
             if st.get("suspicious_hit"):
@@ -3700,6 +3867,15 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
             confs.append(int(r.get("site_confidence", 0) or 0))
             scores.append(float(r.get("score", 0) or 0))
             bigs.append(float(r.get("big_score", r.get("score",0)) or 0))
+            rank_raw = r.get("rank_score_raw")
+            if isinstance(rank_raw, (int, float)):
+                ranks.append(float(rank_raw))
+            qv = r.get("quality_score")
+            if isinstance(qv, (int, float)):
+                qualities.append(float(qv))
+            mv = r.get("momentum_score")
+            if isinstance(mv, (int, float)):
+                momenta.append(float(mv))
 
         rows = all_rows if isinstance(all_rows, list) else []
         sorted_rows = sorted(
@@ -3718,12 +3894,19 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
             "avg_confidence": (sum(confs) / len(confs)) if confs else None,
             "avg_score": (sum(scores) / len(scores)) if scores else None,
             "avg_big_score": (sum(bigs) / len(bigs)) if bigs else None,
+            "avg_rank_score_raw": (sum(ranks) / len(ranks)) if ranks else None,
+            "avg_quality_score": (sum(qualities) / len(qualities)) if qualities else None,
+            "avg_momentum_score": (sum(momenta) / len(momenta)) if momenta else None,
             "top10": [
                 {
                     "gid": r.get("gid"),
                     "name": r.get("name"),
                     "score": r.get("score"),
                     "big_score": r.get("big_score"),
+                    "rank_score_raw": r.get("rank_score_raw"),
+                    "rank_percentile": r.get("rank_percentile"),
+                    "quality_score": r.get("quality_score"),
+                    "momentum_score": r.get("momentum_score"),
                     "delta": r.get("delta"),
                     "conf": r.get("site_confidence"),
                     "bell": (r.get("stats",{}) or {}).get("bell"),
@@ -3905,6 +4088,19 @@ def load_config():
             "bd_day_sat": 14,
             "trust_day_sat": 18,
             "bd_input_min_confidence": 0
+        },
+        "rank": {
+            "quality_half_life": 60,
+            "momentum_half_life": 14,
+            "momentum_bell_sat": 20,
+            "quality_prior_bell": 1.0,
+            "quality_prior_open": 1.0,
+            "zero_total_weight": 0.35,
+            "rank_momentum_base": 0.2,
+            "quality_power": 1.0,
+            "momentum_power": 1.0,
+            "rank_max_window": 112,
+            "rank_input_min_confidence": 0
         },
         "retention": {
             "months": 6,
@@ -5608,11 +5804,25 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
             r["bd_obs_days"] = detail.get("bd_obs_days")
             r["bd_model"] = _BD_MODEL_NAME
             r["bd_model_version"] = detail.get("bd_model_version")
+            rank_raw, rank_detail = _calc_rank_score_detail(stats, hist, cur_stats_by_date=stats_by_date)
+            r["quality_score"] = rank_detail.get("quality_score")
+            r["momentum_score"] = rank_detail.get("momentum_score")
+            r["rank_score_raw"] = rank_detail.get("rank_score_raw")
+            r["rank_model_version"] = rank_detail.get("rank_model_version")
+            r["rank_detail"] = rank_detail
         except Exception as e:
             r["big_score"] = r.get("score",0)
             log_event("WARN", "calc_bigdata_score failed", preset=job.name, gid=gid, err=str(e)[:200])
         r["spike"] = r.get("score", 0) - r.get("big_score", r.get("score", 0))
 
+        out.append(r)
+
+    _assign_rank_percentiles(out)
+
+    for r in out:
+        gid = r.get("gid","")
+        stats = r.get("stats", {}) or {}
+        stats_by_date = r.get("stats_by_date") if isinstance(r.get("stats_by_date"), dict) else None
         if gid:
             try:
                 append_history(gid, {
@@ -5632,6 +5842,12 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "bd_window": r.get("bd_window"),
                     "bd_service_days": r.get("bd_service_days"),
                     "bd_obs_days": r.get("bd_obs_days"),
+                    "quality_score": r.get("quality_score"),
+                    "momentum_score": r.get("momentum_score"),
+                    "rank_score_raw": r.get("rank_score_raw"),
+                    "rank_percentile": r.get("rank_percentile"),
+                    "rank_model_version": r.get("rank_model_version"),
+                    "rank_detail": r.get("rank_detail"),
                     "spike": r.get("spike"),
                     "site_confidence": r.get("site_confidence", 0),
                     "stats": stats,
@@ -5653,11 +5869,14 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "big_score": r.get("big_score"),
                     "big_score_old": r.get("big_score_old"),
                     "bd_window": r.get("bd_window"),
+                    "quality_score": r.get("quality_score"),
+                    "momentum_score": r.get("momentum_score"),
+                    "rank_score_raw": r.get("rank_score_raw"),
+                    "rank_percentile": r.get("rank_percentile"),
+                    "rank_model_version": r.get("rank_model_version"),
                 })
             except Exception as e:
                 log_event("ERR", "save_state_snapshot failed", preset=job.name, gid=gid, err=str(e)[:200])
-
-        out.append(r)
 
     save_job_outputs(run_dir, job, job_i, out, prev_rows or [])
 
@@ -5935,12 +6154,53 @@ def _debug_bd_print():
     print("[debug-bd] level:", f"{detail.get('bd_level', 0):.6f}", "volume:", f"{detail.get('bd_volume_factor', 0):.6f}", "big_score:", f"{detail.get('big_score', 0):.6f}")
     print("[debug-bd] ma28/ma56/ma84/ma112:", f"{detail.get('ma28')}", f"{detail.get('ma56')}", f"{detail.get('ma84')}", f"{detail.get('ma112')}")
 
+def _debug_rank_print():
+    today = datetime.date.today()
+
+    def _hist(days_ago, bell, maru, tel):
+        day = today - datetime.timedelta(days=days_ago)
+        return {
+            "ts": day.strftime("%Y%m%d_090000"),
+            "stats_by_date": {
+                day.isoformat(): {"bell": bell, "maru": maru, "tel": tel},
+            },
+        }
+
+    print("[debug-rank] T1: same input/history -> stable")
+    hist = [_hist(1, 5, 5, 0), _hist(2, 5, 5, 0)]
+    cur = {"bell": 5, "maru": 5, "tel": 0}
+    r1, d1 = _calc_rank_score_detail(cur, hist)
+    r2, d2 = _calc_rank_score_detail(cur, hist)
+    print("[debug-rank] T1 quality:", f"{d1.get('quality_score', 0):.6f}", "momentum:", f"{d1.get('momentum_score', 0):.6f}", "rank:", f"{r1:.6f}")
+    print("[debug-rank] T1 repeat rank:", f"{r2:.6f}")
+
+    print("[debug-rank] T2: bell固定でmaru/tel増 -> quality低下")
+    r_low, d_low = _calc_rank_score_detail({"bell": 5, "maru": 5, "tel": 0}, [])
+    r_high, d_high = _calc_rank_score_detail({"bell": 5, "maru": 15, "tel": 0}, [])
+    print("[debug-rank] T2 quality base:", f"{d_low.get('quality_score', 0):.6f}", "vs", f"{d_high.get('quality_score', 0):.6f}")
+
+    print("[debug-rank] T3: quality同等でも最近bell増 -> momentum上昇")
+    r_a, d_a = _calc_rank_score_detail({}, [_hist(1, 5, 5, 0)])
+    r_b, d_b = _calc_rank_score_detail({}, [_hist(1, 10, 10, 0)])
+    print("[debug-rank] T3 quality:", f"{d_a.get('quality_score', 0):.6f}", "vs", f"{d_b.get('quality_score', 0):.6f}")
+    print("[debug-rank] T3 momentum:", f"{d_a.get('momentum_score', 0):.6f}", "vs", f"{d_b.get('momentum_score', 0):.6f}")
+    print("[debug-rank] T3 rank:", f"{r_a:.6f}", "vs", f"{r_b:.6f}")
+
+    print("[debug-rank] T4: 需要停止(古いbell) -> momentum低下")
+    r_recent, d_recent = _calc_rank_score_detail({}, [_hist(1, 10, 0, 0)])
+    r_old, d_old = _calc_rank_score_detail({}, [_hist(14, 10, 0, 0)])
+    print("[debug-rank] T4 momentum recent:", f"{d_recent.get('momentum_score', 0):.6f}", "vs", f"{d_old.get('momentum_score', 0):.6f}")
+    print("[debug-rank] T4 rank recent:", f"{r_recent:.6f}", "vs", f"{r_old:.6f}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug-score", action="store_true", help="print score/bd debug samples")
     parser.add_argument("--debug-bd", action="store_true", help="print BD unique-date debug samples")
+    parser.add_argument("--debug-rank", action="store_true", help="print rank (quality/momentum) debug samples")
     args = parser.parse_args()
     if args.debug_score:
         _debug_score_print()
     if args.debug_bd:
         _debug_bd_print()
+    if args.debug_rank:
+        _debug_rank_print()
