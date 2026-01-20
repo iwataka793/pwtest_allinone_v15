@@ -271,6 +271,8 @@ class CastDetailPanel(ttk.Frame):
             ("gid", "GID", 110),
             ("score", "Score", 80),
             ("big_score", "BD", 80),
+            ("rank_percentile", "Rank%", 80),
+            ("quality_score", "Qual", 70),
             ("conf", "Conf", 70),
             ("bell", HEADER_LABELS["bell"], 60),
             ("maru", HEADER_LABELS["maru"], 60),
@@ -310,6 +312,8 @@ class CastDetailPanel(ttk.Frame):
                 "gid": row.get("gid", ""),
                 "score": self.app._format_score_percent(score_val),
                 "big_score": self.app._format_score_percent(big_score_val),
+                "rank_percentile": self.app._format_score_percent(row.get("rank_percentile")),
+                "quality_score": self.app._format_score_percent(row.get("quality_score")),
                 "conf": self.app._format_plain(conf_val),
                 "bell": self.app._format_plain(self._get_stat(row, "bell")),
                 "maru": self.app._format_plain(self._get_stat(row, "maru")),
@@ -353,6 +357,10 @@ class CastDetailPanel(ttk.Frame):
                 return row.get("score")
             if col_id == "big_score":
                 return row.get("big_score", row.get("score"))
+            if col_id == "rank_percentile":
+                return row.get("rank_percentile", row.get("rank_score_raw"))
+            if col_id == "quality_score":
+                return row.get("quality_score")
             if col_id == "conf":
                 return row.get("site_confidence", row.get("conf"))
             if col_id == "bell":
@@ -622,7 +630,7 @@ class App(tk.Tk):
 
         ttk.Label(top, text="ソート").grid(row=2, column=5, sticky="e", pady=(10,0))
         self.combo_sort = ttk.Combobox(top, width=14, state="readonly",
-                                       values=["総合スコア","ビッグデータ","bell率","ベル数","空き(○)","TEL多い","bookable多い"])
+                                       values=["総合スコア","ランキング(新)","ビッグデータ","bell率","ベル数","空き(○)","TEL多い","bookable多い"])
         self.combo_sort.grid(row=2, column=6, sticky="w", padx=6, pady=(10,0))
         self.combo_sort.set("総合スコア")
         self.combo_sort.bind("<<ComboboxSelected>>", lambda e: self.resort_view())
@@ -691,12 +699,12 @@ class App(tk.Tk):
                   justify="left").pack(anchor="w", pady=6)
 
         ttk.Label(right, text="結果（ダブルクリックでDETAIL / Shift+ダブルクリックでRES）").pack(anchor="w")
-        cols = ("rank","score","big","delta","conf","rate","bell","maru","tel","bookable","total","name")
+        cols = ("rank","score","big","rnk","qual","delta","conf","rate","bell","maru","tel","bookable","total","name")
         self.tree = ttk.Treeview(right, columns=cols, show="headings", height=18)
         self.tree.pack(fill="both", expand=True, pady=6)
 
-        headings = {"rank":"Rank","score":"Score","big":"BD","delta":"Δpop","conf":"Conf","rate":"bell%","bell":HEADER_LABELS["bell"],"maru":HEADER_LABELS["maru"],"tel":HEADER_LABELS["tel"],"bookable":"Bookable","total":"Total","name":"Name"}
-        widths = {"rank":60,"score":80,"big":80,"delta":75,"conf":70,"rate":80,"bell":60,"maru":60,"tel":60,"bookable":95,"total":75,"name":270}
+        headings = {"rank":"Rank","score":"Score","big":"BD","rnk":"Rank%","qual":"Qual","delta":"Δpop","conf":"Conf","rate":"bell%","bell":HEADER_LABELS["bell"],"maru":HEADER_LABELS["maru"],"tel":HEADER_LABELS["tel"],"bookable":"Bookable","total":"Total","name":"Name"}
+        widths = {"rank":60,"score":80,"big":80,"rnk":70,"qual":70,"delta":75,"conf":70,"rate":80,"bell":60,"maru":60,"tel":60,"bookable":95,"total":75,"name":270}
         for c in cols:
             self.tree.heading(c, text=headings[c])
             self.tree.column(c, width=widths[c], anchor="center", stretch=False)
@@ -708,6 +716,8 @@ class App(tk.Tk):
             "rank":40,
             "score":55,
             "big":55,
+            "rnk":55,
+            "qual":55,
             "delta":55,
             "conf":50,
             "rate":55,
@@ -1659,32 +1669,53 @@ class App(tk.Tk):
                 r["bd_days"] = detail.get("bd_days")
                 r["bd_model"] = _BD_MODEL_NAME
                 r["bd_model_version"] = detail.get("bd_model_version")
+                rank_raw, rank_detail = _calc_rank_score_detail(r.get("stats", {}), hist, cur_stats_by_date=stats_by_date)
+                r["quality_score"] = rank_detail.get("quality_score")
+                r["momentum_score"] = rank_detail.get("momentum_score")
+                r["rank_score_raw"] = rank_detail.get("rank_score_raw")
+                r["rank_model_version"] = rank_detail.get("rank_model_version")
+                r["rank_detail"] = rank_detail
             except Exception:
                 r["big_score"] = r.get("score",0)
 
+            if prev:
+                prev_rows.append(prev)
+
+        _assign_rank_percentiles(collected)
+        save_job_outputs(self.run_dir, job, job_i, collected, prev_rows)
+        for r in collected:
+            gid = r.get("gid","")
+            if not gid:
+                continue
+            stats_by_date = r.get("stats_by_date") if isinstance(r.get("stats_by_date"), dict) else None
             # 履歴追記（フォルダ内完結：score_data/history）
             try:
                 run_ts = os.path.basename(self.run_dir).replace("run_","")
-                if gid:
-                    append_history(gid, {
-                        "ts": _now_ts(),
-                        "run_ts": run_ts,
-                        "job": getattr(job, "name", ""),
-                        "gid": gid,
-                        "name": r.get("name",""),
-                        "score": r.get("score",0),
-                        "big_score": r.get("big_score", r.get("score",0)),
-                        "big_score_old": r.get("big_score_old"),
-                        "delta": r.get("delta"),
-                        "site_confidence": r.get("site_confidence",0),
-                        "stats": r.get("stats",{}),
-                        "stats_by_date": stats_by_date,
-                        "bd_model": r.get("bd_model"),
-                        "bd_model_version": r.get("bd_model_version"),
-                        "bd_level": r.get("bd_level"),
-                        "bd_trust": r.get("bd_trust"),
-                        "bd_days": r.get("bd_days"),
-                    })
+                append_history(gid, {
+                    "ts": _now_ts(),
+                    "run_ts": run_ts,
+                    "job": getattr(job, "name", ""),
+                    "gid": gid,
+                    "name": r.get("name",""),
+                    "score": r.get("score",0),
+                    "big_score": r.get("big_score", r.get("score",0)),
+                    "big_score_old": r.get("big_score_old"),
+                    "delta": r.get("delta"),
+                    "site_confidence": r.get("site_confidence",0),
+                    "stats": r.get("stats",{}),
+                    "stats_by_date": stats_by_date,
+                    "bd_model": r.get("bd_model"),
+                    "bd_model_version": r.get("bd_model_version"),
+                    "bd_level": r.get("bd_level"),
+                    "bd_trust": r.get("bd_trust"),
+                    "bd_days": r.get("bd_days"),
+                    "quality_score": r.get("quality_score"),
+                    "momentum_score": r.get("momentum_score"),
+                    "rank_score_raw": r.get("rank_score_raw"),
+                    "rank_percentile": r.get("rank_percentile"),
+                    "rank_model_version": r.get("rank_model_version"),
+                    "rank_detail": r.get("rank_detail"),
+                })
             except Exception as e:
                 self.log(f"[ERR] append_history failed gid={gid} err={e}\n")
 
@@ -1698,14 +1729,14 @@ class App(tk.Tk):
                 "big_score": r.get("big_score", r.get("score",0)),
                 "big_score_old": r.get("big_score_old"),
                 "site_confidence": r.get("site_confidence",0),
+                "quality_score": r.get("quality_score"),
+                "momentum_score": r.get("momentum_score"),
+                "rank_score_raw": r.get("rank_score_raw"),
+                "rank_percentile": r.get("rank_percentile"),
+                "rank_model_version": r.get("rank_model_version"),
             }
-            if gid:
-                save_state_snapshot(gid, snap)
+            save_state_snapshot(gid, snap)
 
-            if prev:
-                prev_rows.append(prev)
-
-        save_job_outputs(self.run_dir, job, job_i, collected, prev_rows)
         t_job1 = time.perf_counter()
         ok_cnt = len(collected)
         self.log(f"[INFO] job done preset={job.name} ok={ok_cnt} fail={failures} total_time={(t_job1-t_job0):.2f}s\n")
@@ -1719,7 +1750,15 @@ class App(tk.Tk):
 
     def sort_rows(self, rows):
         keyname = self.combo_sort.get()
-        if keyname == "ビッグデータ":
+        if keyname == "ランキング(新)":
+            rows.sort(
+                key=lambda r: (
+                    r.get("rank_percentile") is not None,
+                    r.get("rank_percentile") if r.get("rank_percentile") is not None else r.get("rank_score_raw", 0),
+                ),
+                reverse=True,
+            )
+        elif keyname == "ビッグデータ":
             rows.sort(key=lambda r: (r.get("big_score") if r.get("big_score") is not None else r.get("score",0)), reverse=True)
         elif keyname == "bell率":
             rows.sort(key=lambda r: (r["stats"].get("bell_rate_bookable") is not None, r["stats"].get("bell_rate_bookable") or 0), reverse=True)
@@ -2675,6 +2714,8 @@ class App(tk.Tk):
             rate_s = "N/A" if rate is None else f"{rate*100:.1f}%"
             score_s = f"{r.get('score',0)*100:.1f}"
             big_s = f"{(r.get('big_score', r.get('score',0)) or 0)*100:.1f}"
+            rank_s = self._format_score_percent(r.get("rank_percentile"))
+            qual_s = self._format_score_percent(r.get("quality_score"))
             delta_s = self._format_delta(r)
             conf_s = str(int(self._get_confidence_value(r) or 0))
             tags = []
@@ -2687,6 +2728,8 @@ class App(tk.Tk):
                 idx,
                 score_s,
                 big_s,
+                rank_s,
+                qual_s,
                 delta_s,
                 conf_s,
                 rate_s,
