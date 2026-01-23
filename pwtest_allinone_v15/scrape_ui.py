@@ -273,6 +273,7 @@ class CastDetailPanel(ttk.Frame):
             ("big_score", "BD", 80),
             ("rank_percentile", "Rank%", 80),
             ("quality_score", "Qual", 70),
+            ("quality_lower_bound", "LB", 70),
             ("conf", "Conf", 70),
             ("bell", HEADER_LABELS["bell"], 60),
             ("maru", HEADER_LABELS["maru"], 60),
@@ -314,6 +315,7 @@ class CastDetailPanel(ttk.Frame):
                 "big_score": self.app._format_score_percent(big_score_val),
                 "rank_percentile": self.app._format_score_percent(row.get("rank_percentile")),
                 "quality_score": self.app._format_score_percent(row.get("quality_score")),
+                "quality_lower_bound": self.app._format_score_percent(row.get("quality_lower_bound")),
                 "conf": self.app._format_plain(conf_val),
                 "bell": self.app._format_plain(self._get_stat(row, "bell")),
                 "maru": self.app._format_plain(self._get_stat(row, "maru")),
@@ -361,6 +363,8 @@ class CastDetailPanel(ttk.Frame):
                 return row.get("rank_percentile", row.get("rank_score_raw"))
             if col_id == "quality_score":
                 return row.get("quality_score")
+            if col_id == "quality_lower_bound":
+                return row.get("quality_lower_bound")
             if col_id == "conf":
                 return row.get("site_confidence", row.get("conf"))
             if col_id == "bell":
@@ -699,12 +703,12 @@ class App(tk.Tk):
                   justify="left").pack(anchor="w", pady=6)
 
         ttk.Label(right, text="結果（ダブルクリックでDETAIL / Shift+ダブルクリックでRES）").pack(anchor="w")
-        cols = ("rank","score","big","rnk","qual","delta","conf","rate","bell","maru","tel","bookable","total","name")
+        cols = ("rank","score","big","rnk","qual","lb","delta","conf","rate","bell","maru","tel","bookable","total","name")
         self.tree = ttk.Treeview(right, columns=cols, show="headings", height=18)
         self.tree.pack(fill="both", expand=True, pady=6)
 
-        headings = {"rank":"Rank","score":"Score","big":"BD","rnk":"Rank%","qual":"Qual","delta":"Δpop","conf":"Conf","rate":"bell%","bell":HEADER_LABELS["bell"],"maru":HEADER_LABELS["maru"],"tel":HEADER_LABELS["tel"],"bookable":"Bookable","total":"Total","name":"Name"}
-        widths = {"rank":60,"score":80,"big":80,"rnk":70,"qual":70,"delta":75,"conf":70,"rate":80,"bell":60,"maru":60,"tel":60,"bookable":95,"total":75,"name":270}
+        headings = {"rank":"Rank","score":"Score","big":"BD","rnk":"Rank%","qual":"Qual","lb":"LB","delta":"Δpop","conf":"Conf","rate":"bell%","bell":HEADER_LABELS["bell"],"maru":HEADER_LABELS["maru"],"tel":HEADER_LABELS["tel"],"bookable":"Bookable","total":"Total","name":"Name"}
+        widths = {"rank":60,"score":80,"big":80,"rnk":70,"qual":70,"lb":70,"delta":75,"conf":70,"rate":80,"bell":60,"maru":60,"tel":60,"bookable":95,"total":75,"name":270}
         for c in cols:
             self.tree.heading(c, text=headings[c])
             self.tree.column(c, width=widths[c], anchor="center", stretch=False)
@@ -718,6 +722,7 @@ class App(tk.Tk):
             "big":55,
             "rnk":55,
             "qual":55,
+            "lb":55,
             "delta":55,
             "conf":50,
             "rate":55,
@@ -1671,8 +1676,10 @@ class App(tk.Tk):
                 r["bd_model_version"] = detail.get("bd_model_version")
                 rank_raw, rank_detail = _calc_rank_score_detail(r.get("stats", {}), hist, cur_stats_by_date=stats_by_date)
                 r["quality_score"] = rank_detail.get("quality_score")
+                r["quality_lower_bound"] = rank_detail.get("quality_lower_bound")
                 r["momentum_score"] = rank_detail.get("momentum_score")
                 r["rank_score_raw"] = rank_detail.get("rank_score_raw")
+                r["rank_score_lower"] = rank_detail.get("rank_score_lower")
                 r["rank_model_version"] = rank_detail.get("rank_model_version")
                 r["rank_detail"] = rank_detail
             except Exception:
@@ -1682,6 +1689,7 @@ class App(tk.Tk):
                 prev_rows.append(prev)
 
         _assign_rank_percentiles(collected)
+        _assign_rank_percentiles(collected, score_key="rank_score_lower", percentile_key="rank_percentile_lower")
         save_job_outputs(self.run_dir, job, job_i, collected, prev_rows)
         for r in collected:
             gid = r.get("gid","")
@@ -1710,9 +1718,12 @@ class App(tk.Tk):
                     "bd_trust": r.get("bd_trust"),
                     "bd_days": r.get("bd_days"),
                     "quality_score": r.get("quality_score"),
+                    "quality_lower_bound": r.get("quality_lower_bound"),
                     "momentum_score": r.get("momentum_score"),
                     "rank_score_raw": r.get("rank_score_raw"),
+                    "rank_score_lower": r.get("rank_score_lower"),
                     "rank_percentile": r.get("rank_percentile"),
+                    "rank_percentile_lower": r.get("rank_percentile_lower"),
                     "rank_model_version": r.get("rank_model_version"),
                     "rank_detail": r.get("rank_detail"),
                 })
@@ -1730,9 +1741,12 @@ class App(tk.Tk):
                 "big_score_old": r.get("big_score_old"),
                 "site_confidence": r.get("site_confidence",0),
                 "quality_score": r.get("quality_score"),
+                "quality_lower_bound": r.get("quality_lower_bound"),
                 "momentum_score": r.get("momentum_score"),
                 "rank_score_raw": r.get("rank_score_raw"),
+                "rank_score_lower": r.get("rank_score_lower"),
                 "rank_percentile": r.get("rank_percentile"),
+                "rank_percentile_lower": r.get("rank_percentile_lower"),
                 "rank_model_version": r.get("rank_model_version"),
             }
             save_state_snapshot(gid, snap)
@@ -1751,10 +1765,16 @@ class App(tk.Tk):
     def sort_rows(self, rows):
         keyname = self.combo_sort.get()
         if keyname == "ランキング(新)":
+            cfg = load_config()
+            rank_cfg = cfg.get("rank", {}) if isinstance(cfg, dict) else {}
+            sort_mode = str(rank_cfg.get("rank_sort_mode", "raw") or "raw").lower()
+            use_lower = sort_mode == "lower"
             rows.sort(
                 key=lambda r: (
-                    r.get("rank_percentile") is not None,
-                    r.get("rank_percentile") if r.get("rank_percentile") is not None else r.get("rank_score_raw", 0),
+                    (r.get("rank_percentile_lower") if use_lower else r.get("rank_percentile")) is not None,
+                    (r.get("rank_percentile_lower") if use_lower else r.get("rank_percentile"))
+                    if (r.get("rank_percentile_lower") if use_lower else r.get("rank_percentile")) is not None
+                    else (r.get("rank_score_lower") if use_lower else r.get("rank_score_raw", 0)),
                 ),
                 reverse=True,
             )
@@ -2716,6 +2736,7 @@ class App(tk.Tk):
             big_s = f"{(r.get('big_score', r.get('score',0)) or 0)*100:.1f}"
             rank_s = self._format_score_percent(r.get("rank_percentile"))
             qual_s = self._format_score_percent(r.get("quality_score"))
+            lb_s = self._format_score_percent(r.get("quality_lower_bound"))
             delta_s = self._format_delta(r)
             conf_s = str(int(self._get_confidence_value(r) or 0))
             tags = []
@@ -2730,6 +2751,7 @@ class App(tk.Tk):
                 big_s,
                 rank_s,
                 qual_s,
+                lb_s,
                 delta_s,
                 conf_s,
                 rate_s,
