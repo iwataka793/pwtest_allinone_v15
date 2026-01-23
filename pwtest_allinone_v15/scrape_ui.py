@@ -270,10 +270,10 @@ class CastDetailPanel(ttk.Frame):
             ("name", "Name", 200),
             ("gid", "GID", 110),
             ("score", "Score", 80),
-            ("big_score", "BD", 80),
-            ("rank_percentile", "Rank%", 80),
-            ("quality_score", "Qual", 70),
-            ("quality_lower_bound", "LB", 70),
+            ("big_score", self.app._get_bigdata_label(), 80),
+            ("rank_percentile", self.app._get_rank_column_label(), 80),
+            ("quality_score", self.app._get_quality_label(), 70),
+            ("quality_lower_bound", self.app._get_lower_label(), 70),
             ("conf", "Conf", 70),
             ("bell", HEADER_LABELS["bell"], 60),
             ("maru", HEADER_LABELS["maru"], 60),
@@ -307,15 +307,18 @@ class CastDetailPanel(ttk.Frame):
             score_val = row.get("score")
             big_score_val = row.get("big_score", score_val)
             conf_val = row.get("site_confidence", row.get("conf"))
+            rank_percentile_val = self.app._get_rank_display_value(row)
+            quality_score_val = self.app._get_rank_detail_value(row, "quality_score")
+            quality_lower_val = self.app._get_rank_detail_value(row, "quality_lower_bound")
             row_values = {
                 "rank": idx,
                 "name": self.app._format_cast_name(row.get("name", "")),
                 "gid": row.get("gid", ""),
                 "score": self.app._format_score_percent(score_val),
                 "big_score": self.app._format_score_percent(big_score_val),
-                "rank_percentile": self.app._format_score_percent(row.get("rank_percentile")),
-                "quality_score": self.app._format_score_percent(row.get("quality_score")),
-                "quality_lower_bound": self.app._format_score_percent(row.get("quality_lower_bound")),
+                "rank_percentile": self.app._format_score_percent(rank_percentile_val),
+                "quality_score": self.app._format_score_percent(quality_score_val),
+                "quality_lower_bound": self.app._format_score_percent(quality_lower_val),
                 "conf": self.app._format_plain(conf_val),
                 "bell": self.app._format_plain(self._get_stat(row, "bell")),
                 "maru": self.app._format_plain(self._get_stat(row, "maru")),
@@ -360,11 +363,11 @@ class CastDetailPanel(ttk.Frame):
             if col_id == "big_score":
                 return row.get("big_score", row.get("score"))
             if col_id == "rank_percentile":
-                return row.get("rank_percentile", row.get("rank_score_raw"))
+                return self.app._get_rank_sort_value(row)
             if col_id == "quality_score":
-                return row.get("quality_score")
+                return self.app._get_rank_detail_value(row, "quality_score")
             if col_id == "quality_lower_bound":
-                return row.get("quality_lower_bound")
+                return self.app._get_rank_detail_value(row, "quality_lower_bound")
             if col_id == "conf":
                 return row.get("site_confidence", row.get("conf"))
             if col_id == "bell":
@@ -589,6 +592,131 @@ class App(tk.Tk):
         self.after(100, self._preload_results_from_latest_daily_snapshot)
         self.after(0, self._finish_startup)
 
+    def _get_rank_sort_mode(self):
+        cfg = load_config()
+        rank_cfg = cfg.get("rank", {}) if isinstance(cfg, dict) else {}
+        sort_mode = str(rank_cfg.get("rank_sort_mode", "raw") or "raw").lower()
+        return "lower" if sort_mode == "lower" else "raw"
+
+    def _get_rank_labels(self):
+        if self._get_rank_sort_mode() == "lower":
+            label = "Rank%（下限）"
+        else:
+            label = "Rank%（品質×勢い）"
+        return {"sort": label, "column": label}
+
+    def _get_rank_sort_label(self):
+        return self._get_rank_labels()["sort"]
+
+    def _get_rank_column_label(self):
+        return self._get_rank_labels()["column"]
+
+    def _get_bigdata_label(self):
+        return "BigData"
+
+    def _get_quality_label(self):
+        return "Quality"
+
+    def _get_lower_label(self):
+        return "Lower%"
+
+    def _get_main_tree_headings(self):
+        return {
+            "rank": "Rank",
+            "score": "Score",
+            "big": self._get_bigdata_label(),
+            "rnk": self._get_rank_column_label(),
+            "qual": self._get_quality_label(),
+            "lb": self._get_lower_label(),
+            "delta": "Δpop",
+            "conf": "Conf",
+            "rate": "bell%",
+            "bell": HEADER_LABELS["bell"],
+            "maru": HEADER_LABELS["maru"],
+            "tel": HEADER_LABELS["tel"],
+            "bookable": "Bookable",
+            "total": "Total",
+            "name": "Name",
+        }
+
+    def _get_sort_options(self):
+        return [
+            "総合スコア",
+            self._get_rank_sort_label(),
+            "ビッグデータ",
+            "bell率",
+            "ベル数",
+            "空き(○)",
+            "TEL多い",
+            "bookable多い",
+        ]
+
+    def _normalize_sort_label(self, label):
+        rank_label = self._get_rank_sort_label()
+        legacy_labels = {"ランキング(新)", "Rank%（品質×勢い）", "Rank%（下限）"}
+        if label in legacy_labels:
+            return rank_label
+        return label
+
+    def _is_rank_sort_label(self, label):
+        return label == self._get_rank_sort_label() or label == "ランキング(新)"
+
+    def _refresh_rank_labels(self):
+        if not getattr(self, "combo_sort", None):
+            return
+        current = self.combo_sort.get()
+        options = self._get_sort_options()
+        self.combo_sort.configure(values=options)
+        normalized = self._normalize_sort_label(current)
+        if normalized in options and normalized != current:
+            self.combo_sort.set(normalized)
+        if getattr(self, "tree", None):
+            headings = self._get_main_tree_headings()
+            for key, label in headings.items():
+                if key in self.tree["columns"]:
+                    self.tree.heading(key, text=label)
+
+    def _get_rank_detail(self, row):
+        if not isinstance(row, dict):
+            return {}
+        detail = row.get("rank_detail")
+        return detail if isinstance(detail, dict) else {}
+
+    def _get_rank_detail_value(self, row, key):
+        detail = self._get_rank_detail(row)
+        if key in detail:
+            return detail.get(key)
+        if isinstance(row, dict):
+            return row.get(key)
+        return None
+
+    def _get_rank_keys(self):
+        if self._get_rank_sort_mode() == "lower":
+            return ("rank_percentile_lower", "rank_score_lower")
+        return ("rank_percentile", "rank_score_raw")
+
+    def _get_rank_display_value(self, row):
+        percentile_key, _ = self._get_rank_keys()
+        value = self._get_rank_detail_value(row, percentile_key)
+        if value is None:
+            fallback = "rank_percentile" if percentile_key == "rank_percentile_lower" else "rank_percentile_lower"
+            value = self._get_rank_detail_value(row, fallback)
+        return value
+
+    def _get_rank_sort_value(self, row):
+        percentile_key, score_key = self._get_rank_keys()
+        percentile = self._get_rank_detail_value(row, percentile_key)
+        if percentile is None:
+            fallback = "rank_percentile" if percentile_key == "rank_percentile_lower" else "rank_percentile_lower"
+            percentile = self._get_rank_detail_value(row, fallback)
+        if percentile is not None:
+            return percentile
+        score = self._get_rank_detail_value(row, score_key)
+        if score is None:
+            fallback = "rank_score_raw" if score_key == "rank_score_lower" else "rank_score_lower"
+            score = self._get_rank_detail_value(row, fallback)
+        return score if score is not None else 0
+
     def _build_ui(self):
         dashboard = ttk.LabelFrame(self, text="ダッシュボード")
         dashboard.pack(fill="x", padx=10, pady=(8, 0))
@@ -633,8 +761,8 @@ class App(tk.Tk):
         ttk.Button(top, text="キューに追加", command=self.add_to_queue).grid(row=2, column=1, sticky="w", padx=6, pady=(10,0))
 
         ttk.Label(top, text="ソート").grid(row=2, column=5, sticky="e", pady=(10,0))
-        self.combo_sort = ttk.Combobox(top, width=14, state="readonly",
-                                       values=["総合スコア","ランキング(新)","ビッグデータ","bell率","ベル数","空き(○)","TEL多い","bookable多い"])
+        self.combo_sort = ttk.Combobox(top, width=16, state="readonly",
+                                       values=self._get_sort_options())
         self.combo_sort.grid(row=2, column=6, sticky="w", padx=6, pady=(10,0))
         self.combo_sort.set("総合スコア")
         self.combo_sort.bind("<<ComboboxSelected>>", lambda e: self.resort_view())
@@ -707,7 +835,7 @@ class App(tk.Tk):
         self.tree = ttk.Treeview(right, columns=cols, show="headings", height=18)
         self.tree.pack(fill="both", expand=True, pady=6)
 
-        headings = {"rank":"Rank","score":"Score","big":"BD","rnk":"Rank%","qual":"Qual","lb":"LB","delta":"Δpop","conf":"Conf","rate":"bell%","bell":HEADER_LABELS["bell"],"maru":HEADER_LABELS["maru"],"tel":HEADER_LABELS["tel"],"bookable":"Bookable","total":"Total","name":"Name"}
+        headings = self._get_main_tree_headings()
         widths = {"rank":60,"score":80,"big":80,"rnk":70,"qual":70,"lb":70,"delta":75,"conf":70,"rate":80,"bell":60,"maru":60,"tel":60,"bookable":95,"total":75,"name":270}
         for c in cols:
             self.tree.heading(c, text=headings[c])
@@ -1748,6 +1876,7 @@ class App(tk.Tk):
                 "rank_percentile": r.get("rank_percentile"),
                 "rank_percentile_lower": r.get("rank_percentile_lower"),
                 "rank_model_version": r.get("rank_model_version"),
+                "rank_detail": r.get("rank_detail"),
             }
             save_state_snapshot(gid, snap)
 
@@ -1764,18 +1893,15 @@ class App(tk.Tk):
 
     def sort_rows(self, rows):
         keyname = self.combo_sort.get()
-        if keyname == "ランキング(新)":
-            cfg = load_config()
-            rank_cfg = cfg.get("rank", {}) if isinstance(cfg, dict) else {}
-            sort_mode = str(rank_cfg.get("rank_sort_mode", "raw") or "raw").lower()
-            use_lower = sort_mode == "lower"
+        if self._is_rank_sort_label(keyname):
+            def _rank_key(row):
+                percentile = self._get_rank_display_value(row)
+                return (
+                    percentile is not None,
+                    percentile if percentile is not None else self._get_rank_sort_value(row),
+                )
             rows.sort(
-                key=lambda r: (
-                    (r.get("rank_percentile_lower") if use_lower else r.get("rank_percentile")) is not None,
-                    (r.get("rank_percentile_lower") if use_lower else r.get("rank_percentile"))
-                    if (r.get("rank_percentile_lower") if use_lower else r.get("rank_percentile")) is not None
-                    else (r.get("rank_score_lower") if use_lower else r.get("rank_score_raw", 0)),
-                ),
+                key=_rank_key,
                 reverse=True,
             )
         elif keyname == "ビッグデータ":
@@ -2711,6 +2837,7 @@ class App(tk.Tk):
     def resort_view(self):
         if not self.results:
             return
+        self._refresh_rank_labels()
         self.results = self.sort_rows(self.results)
         self.populate_tree()
 
@@ -2734,9 +2861,9 @@ class App(tk.Tk):
             rate_s = "N/A" if rate is None else f"{rate*100:.1f}%"
             score_s = f"{r.get('score',0)*100:.1f}"
             big_s = f"{(r.get('big_score', r.get('score',0)) or 0)*100:.1f}"
-            rank_s = self._format_score_percent(r.get("rank_percentile"))
-            qual_s = self._format_score_percent(r.get("quality_score"))
-            lb_s = self._format_score_percent(r.get("quality_lower_bound"))
+            rank_s = self._format_score_percent(self._get_rank_display_value(r))
+            qual_s = self._format_score_percent(self._get_rank_detail_value(r, "quality_score"))
+            lb_s = self._format_score_percent(self._get_rank_detail_value(r, "quality_lower_bound"))
             delta_s = self._format_delta(r)
             conf_s = str(int(self._get_confidence_value(r) or 0))
             tags = []
