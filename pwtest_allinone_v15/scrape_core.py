@@ -3869,6 +3869,9 @@ def _assign_rank_percentiles(rows: list, score_key: str = "rank_score_raw", perc
             row[percentile_key] = _percentile_of(float(val), scores)
         else:
             row[percentile_key] = None
+        rank_detail = row.get("rank_detail")
+        if isinstance(rank_detail, dict):
+            rank_detail[percentile_key] = row.get(percentile_key)
 
 def calc_bigdata_score(cur_score: float, cur_stats: dict, hist: list, cur_stats_by_date: dict = None):
     _, detail = _calc_bigdata_score_detail(cur_stats, hist, cur_stats_by_date=cur_stats_by_date)
