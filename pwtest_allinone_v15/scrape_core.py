@@ -2527,6 +2527,8 @@ def _get_rank_params():
         momentum_bell_sat = float(rank_cfg.get("momentum_bell_sat", 20) or 20)
         quality_prior_bell = float(rank_cfg.get("quality_prior_bell", 1.0) or 1.0)
         quality_prior_open = float(rank_cfg.get("quality_prior_open", 1.0) or 1.0)
+        quality_lower_z = float(rank_cfg.get("quality_lower_z", 1.96) or 1.96)
+        rank_sort_mode = str(rank_cfg.get("rank_sort_mode", "raw") or "raw").lower()
         zero_total_weight = float(rank_cfg.get("zero_total_weight", 0.35) or 0.35)
         rank_momentum_base = float(rank_cfg.get("rank_momentum_base", 0.2) or 0.2)
         quality_power = float(rank_cfg.get("quality_power", 1.0) or 1.0)
@@ -2539,6 +2541,8 @@ def _get_rank_params():
             "momentum_bell_sat": momentum_bell_sat if momentum_bell_sat > 0 else 20,
             "quality_prior_bell": quality_prior_bell if quality_prior_bell > 0 else 1.0,
             "quality_prior_open": quality_prior_open if quality_prior_open > 0 else 1.0,
+            "quality_lower_z": quality_lower_z if quality_lower_z > 0 else 1.96,
+            "rank_sort_mode": rank_sort_mode if rank_sort_mode in ("raw", "lower") else "raw",
             "zero_total_weight": zero_total_weight if zero_total_weight > 0 else 0.35,
             "rank_momentum_base": max(0.0, min(rank_momentum_base, 1.0)),
             "quality_power": quality_power if quality_power > 0 else 1.0,
@@ -2554,6 +2558,16 @@ def _clamp01(value: float) -> float:
     if value > 1.0:
         return 1.0
     return value
+
+def _wilson_lower_bound(successes: float, total: float, z: float) -> float:
+    if total <= 0 or z <= 0:
+        return 0.0
+    z2 = z * z
+    phat = successes / total
+    denom = 1.0 + (z2 / total)
+    center = phat + (z2 / (2.0 * total))
+    margin = z * math.sqrt((phat * (1.0 - phat) + (z2 / (4.0 * total))) / total)
+    return _clamp01((center - margin) / denom)
 
 def score_v2(stats: dict, bell_sat: float = None) -> float:
     bell = int((stats or {}).get("bell", 0) or 0)
@@ -3719,6 +3733,7 @@ def _calc_rank_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict
     momentum_bell_sat = float(params.get("momentum_bell_sat", 20) or 20)
     prior_bell = float(params.get("quality_prior_bell", 1.0) or 1.0)
     prior_open = float(params.get("quality_prior_open", 1.0) or 1.0)
+    quality_lower_z = float(params.get("quality_lower_z", 1.96) or 1.96)
     zero_total_weight = float(params.get("zero_total_weight", 0.35) or 0.35)
     rank_momentum_base = float(params.get("rank_momentum_base", 0.2) or 0.2)
     quality_power = float(params.get("quality_power", 1.0) or 1.0)
@@ -3730,6 +3745,8 @@ def _calc_rank_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict
     series = series[:max_window]
 
     entries = []
+    quality_success_wsum = 0.0
+    quality_total_wsum = 0.0
     for idx, s in enumerate(series):
         bell = int(s.get("bell", 0) or 0)
         maru = int(s.get("maru", 0) or 0)
@@ -3748,12 +3765,18 @@ def _calc_rank_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict
         if total > 0:
             fill = (bell + prior_bell) / (total + prior_bell + prior_open)
             weight = math.exp(-age / quality_half_life) if quality_half_life > 0 else 1.0
+            effective_success = bell + prior_bell
+            effective_total = total + prior_bell + prior_open
         else:
             fill = 0.0
             weight = (math.exp(-age / quality_half_life) if quality_half_life > 0 else 1.0) * zero_total_weight
+            effective_success = 0.0
+            effective_total = 0.0
 
         momentum_weight = math.exp(-age / momentum_half_life) if momentum_half_life > 0 else 1.0
 
+        quality_success_wsum += effective_success * weight
+        quality_total_wsum += effective_total * weight
         entries.append({
             "bell": bell,
             "maru": maru,
@@ -3771,6 +3794,10 @@ def _calc_rank_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict
         tel = int((cur_stats or {}).get("tel", 0) or 0)
         total = bell + maru + tel
         fill = (bell + prior_bell) / (total + prior_bell + prior_open) if total > 0 else 0.0
+        effective_success = (bell + prior_bell) if total > 0 else 0.0
+        effective_total = (total + prior_bell + prior_open) if total > 0 else 0.0
+        quality_success_wsum += effective_success
+        quality_total_wsum += effective_total
         entries.append({
             "bell": bell,
             "maru": maru,
@@ -3786,25 +3813,32 @@ def _calc_rank_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict
     quality_num = sum(e["fill"] * e["quality_weight"] for e in entries) if quality_wsum > 0 else 0.0
     quality = (quality_num / quality_wsum) if quality_wsum > 0 else 0.0
 
+    quality_lower = _wilson_lower_bound(quality_success_wsum, quality_total_wsum, quality_lower_z)
     momentum_bell = sum(e["bell"] * e["momentum_weight"] for e in entries)
     momentum = 1.0 - math.exp(-momentum_bell / float(momentum_bell_sat)) if momentum_bell_sat > 0 else 0.0
 
     quality = _clamp01(quality)
+    quality_lower = _clamp01(quality_lower)
     momentum = _clamp01(momentum)
 
     rank_raw = (quality ** quality_power) * (rank_momentum_base + (1.0 - rank_momentum_base) * (momentum ** momentum_power))
     rank_raw = _clamp01(rank_raw)
+    rank_lower = (quality_lower ** quality_power) * (rank_momentum_base + (1.0 - rank_momentum_base) * (momentum ** momentum_power))
+    rank_lower = _clamp01(rank_lower)
 
     detail = {
         "rank_model_version": _RANK_MODEL_NAME,
         "quality_score": quality,
+        "quality_lower_bound": quality_lower,
         "momentum_score": momentum,
         "rank_score_raw": rank_raw,
+        "rank_score_lower": rank_lower,
         "quality_half_life": quality_half_life,
         "momentum_half_life": momentum_half_life,
         "momentum_bell_sat": momentum_bell_sat,
         "quality_prior_bell": prior_bell,
         "quality_prior_open": prior_open,
+        "quality_lower_z": quality_lower_z,
         "zero_total_weight": zero_total_weight,
         "rank_momentum_base": rank_momentum_base,
         "quality_power": quality_power,
@@ -3814,6 +3848,8 @@ def _calc_rank_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict
         "rank_obs_days": len(obs_dates),
         "rank_weighted_bell": momentum_bell,
         "rank_weighted_quality_sum": quality_wsum,
+        "rank_weighted_quality_success": quality_success_wsum,
+        "rank_weighted_quality_total": quality_total_wsum,
     }
     return rank_raw, detail
 
@@ -3859,6 +3895,8 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
         bigs = []
         ranks = []
         qualities = []
+        lower_bounds = []
+        rank_lowers = []
         momenta = []
         for r in all_rows:
             st = r.get("stats", {}) or {}
@@ -3873,9 +3911,15 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
             qv = r.get("quality_score")
             if isinstance(qv, (int, float)):
                 qualities.append(float(qv))
+            qlb = r.get("quality_lower_bound")
+            if isinstance(qlb, (int, float)):
+                lower_bounds.append(float(qlb))
             mv = r.get("momentum_score")
             if isinstance(mv, (int, float)):
                 momenta.append(float(mv))
+            rl = r.get("rank_score_lower")
+            if isinstance(rl, (int, float)):
+                rank_lowers.append(float(rl))
 
         rows = all_rows if isinstance(all_rows, list) else []
         sorted_rows = sorted(
@@ -3896,7 +3940,9 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
             "avg_big_score": (sum(bigs) / len(bigs)) if bigs else None,
             "avg_rank_score_raw": (sum(ranks) / len(ranks)) if ranks else None,
             "avg_quality_score": (sum(qualities) / len(qualities)) if qualities else None,
+            "avg_quality_lower_bound": (sum(lower_bounds) / len(lower_bounds)) if lower_bounds else None,
             "avg_momentum_score": (sum(momenta) / len(momenta)) if momenta else None,
+            "avg_rank_score_lower": (sum(rank_lowers) / len(rank_lowers)) if rank_lowers else None,
             "top10": [
                 {
                     "gid": r.get("gid"),
@@ -3904,8 +3950,11 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
                     "score": r.get("score"),
                     "big_score": r.get("big_score"),
                     "rank_score_raw": r.get("rank_score_raw"),
+                    "rank_score_lower": r.get("rank_score_lower"),
                     "rank_percentile": r.get("rank_percentile"),
+                    "rank_percentile_lower": r.get("rank_percentile_lower"),
                     "quality_score": r.get("quality_score"),
+                    "quality_lower_bound": r.get("quality_lower_bound"),
                     "momentum_score": r.get("momentum_score"),
                     "delta": r.get("delta"),
                     "conf": r.get("site_confidence"),
@@ -4095,12 +4144,14 @@ def load_config():
             "momentum_bell_sat": 20,
             "quality_prior_bell": 1.0,
             "quality_prior_open": 1.0,
+            "quality_lower_z": 1.96,
             "zero_total_weight": 0.35,
             "rank_momentum_base": 0.2,
             "quality_power": 1.0,
             "momentum_power": 1.0,
             "rank_max_window": 112,
-            "rank_input_min_confidence": 0
+            "rank_input_min_confidence": 0,
+            "rank_sort_mode": "raw"
         },
         "retention": {
             "months": 6,
@@ -5806,8 +5857,10 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
             r["bd_model_version"] = detail.get("bd_model_version")
             rank_raw, rank_detail = _calc_rank_score_detail(stats, hist, cur_stats_by_date=stats_by_date)
             r["quality_score"] = rank_detail.get("quality_score")
+            r["quality_lower_bound"] = rank_detail.get("quality_lower_bound")
             r["momentum_score"] = rank_detail.get("momentum_score")
             r["rank_score_raw"] = rank_detail.get("rank_score_raw")
+            r["rank_score_lower"] = rank_detail.get("rank_score_lower")
             r["rank_model_version"] = rank_detail.get("rank_model_version")
             r["rank_detail"] = rank_detail
         except Exception as e:
@@ -5818,6 +5871,7 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
         out.append(r)
 
     _assign_rank_percentiles(out)
+    _assign_rank_percentiles(out, score_key="rank_score_lower", percentile_key="rank_percentile_lower")
 
     for r in out:
         gid = r.get("gid","")
@@ -5843,9 +5897,12 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "bd_service_days": r.get("bd_service_days"),
                     "bd_obs_days": r.get("bd_obs_days"),
                     "quality_score": r.get("quality_score"),
+                    "quality_lower_bound": r.get("quality_lower_bound"),
                     "momentum_score": r.get("momentum_score"),
                     "rank_score_raw": r.get("rank_score_raw"),
+                    "rank_score_lower": r.get("rank_score_lower"),
                     "rank_percentile": r.get("rank_percentile"),
+                    "rank_percentile_lower": r.get("rank_percentile_lower"),
                     "rank_model_version": r.get("rank_model_version"),
                     "rank_detail": r.get("rank_detail"),
                     "spike": r.get("spike"),
@@ -5870,9 +5927,12 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "big_score_old": r.get("big_score_old"),
                     "bd_window": r.get("bd_window"),
                     "quality_score": r.get("quality_score"),
+                    "quality_lower_bound": r.get("quality_lower_bound"),
                     "momentum_score": r.get("momentum_score"),
                     "rank_score_raw": r.get("rank_score_raw"),
+                    "rank_score_lower": r.get("rank_score_lower"),
                     "rank_percentile": r.get("rank_percentile"),
+                    "rank_percentile_lower": r.get("rank_percentile_lower"),
                     "rank_model_version": r.get("rank_model_version"),
                 })
             except Exception as e:
@@ -6191,6 +6251,21 @@ def _debug_rank_print():
     r_old, d_old = _calc_rank_score_detail({}, [_hist(14, 10, 0, 0)])
     print("[debug-rank] T4 momentum recent:", f"{d_recent.get('momentum_score', 0):.6f}", "vs", f"{d_old.get('momentum_score', 0):.6f}")
     print("[debug-rank] T4 rank recent:", f"{r_recent:.6f}", "vs", f"{r_old:.6f}")
+
+    print("[debug-rank] T5: 同率でも観測多い方がLB高い")
+    _r_small, d_small = _calc_rank_score_detail({"bell": 1, "maru": 1, "tel": 0}, [])
+    _r_large, d_large = _calc_rank_score_detail({"bell": 10, "maru": 10, "tel": 0}, [])
+    print(
+        "[debug-rank] T5 quality/lb:",
+        f"{d_small.get('quality_score', 0):.6f}",
+        f"{d_small.get('quality_lower_bound', 0):.6f}",
+        "vs",
+        f"{d_large.get('quality_lower_bound', 0):.6f}",
+    )
+
+    print("[debug-rank] T6: 0観測でもLBが破綻しない")
+    _r_zero, d_zero = _calc_rank_score_detail({"bell": 0, "maru": 0, "tel": 0}, [])
+    print("[debug-rank] T6 quality/lb:", f"{d_zero.get('quality_score', 0):.6f}", f"{d_zero.get('quality_lower_bound', 0):.6f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
