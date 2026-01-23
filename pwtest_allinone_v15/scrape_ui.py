@@ -639,6 +639,21 @@ class App(tk.Tk):
             "name": "Name",
         }
 
+    def _get_score_help_text(self):
+        rank_label = self._get_rank_column_label()
+        rank_note = "Quality×勢いの順位" if self._get_rank_sort_mode() == "raw" else "Quality下限を使った順位"
+        return (
+            f"Score: 当日スコア / "
+            f"BigData: 履歴で平滑化したScore / "
+            f"{rank_label}: {rank_note} / "
+            f"Quality: 長期の埋まり率 / "
+            f"Lower%: Qualityの下限"
+        )
+
+    def _refresh_score_help_text(self):
+        if getattr(self, "lbl_score_help", None):
+            self.lbl_score_help.configure(text=self._get_score_help_text())
+
     def _get_sort_options(self):
         return [
             "総合スコア",
@@ -675,6 +690,7 @@ class App(tk.Tk):
             for key, label in headings.items():
                 if key in self.tree["columns"]:
                     self.tree.heading(key, text=label)
+        self._refresh_score_help_text()
 
     def _get_rank_detail(self, row):
         if not isinstance(row, dict):
@@ -831,6 +847,8 @@ class App(tk.Tk):
                   justify="left").pack(anchor="w", pady=6)
 
         ttk.Label(right, text="結果（ダブルクリックでDETAIL / Shift+ダブルクリックでRES）").pack(anchor="w")
+        self.lbl_score_help = ttk.Label(right, text=self._get_score_help_text(), foreground="#666", wraplength=900)
+        self.lbl_score_help.pack(anchor="w", pady=(2, 4))
         cols = ("rank","score","big","rnk","qual","lb","delta","conf","rate","bell","maru","tel","bookable","total","name")
         self.tree = ttk.Treeview(right, columns=cols, show="headings", height=18)
         self.tree.pack(fill="both", expand=True, pady=6)
