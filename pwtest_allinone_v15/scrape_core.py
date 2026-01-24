@@ -2672,15 +2672,6 @@ def _calc_row_quality(diag: dict) -> tuple[int, str, list, bool]:
         reasons.append("parse_errors")
         core_missing = True
 
-    if diag.get("has_iframe"):
-        score += 5
-        reasons.append("has_iframe")
-    if diag.get("has_time_axis"):
-        score += 5
-        reasons.append("has_time_axis")
-    if int(diag.get("slots_unique", 0) or 0) == int(diag.get("slots_total", 0) or 0) and int(diag.get("slots_total", 0) or 0) > 0:
-        score += 5
-        reasons.append("slots_unique_match")
     if diag.get("all_dash"):
         score -= _QUALITY_ALL_DASH_PENALTY
         reasons.append("all_dash")
@@ -3617,8 +3608,19 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
     max_window = 112
     series = series[:max_window]
 
+    # 重みは idx ではなく「今日からの残日数」を基準にする（欠け日付でも意味がぶれない）
+    service_dates = [
+        s.get("service_date") for s in series
+        if isinstance(s, dict) and isinstance(s.get("service_date"), datetime.date)
+    ]
+    if service_dates:
+        max_days_until = max((d - today).days for d in service_dates)
+    else:
+        max_days_until = 0
+
     entries = []
     for idx, s in enumerate(series):
+        _ = idx  # idxは参照しない（days_untilベースの重み付けに変更）
         bell = int(s.get("bell", 0) or 0)
         maru = int(s.get("maru", 0) or 0)
         tel = int(s.get("tel", 0) or 0)
@@ -3626,10 +3628,18 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
         if total <= 0:
             continue
         smooth_fill = (bell + prior_bell) / (total + prior_bell + prior_open)
-        age = float(idx)
+        service_date = s.get("service_date") or today
+        if isinstance(service_date, datetime.datetime):
+            service_date = service_date.date()
+        if isinstance(service_date, datetime.date):
+            days_until = (service_date - today).days
+        else:
+            days_until = 0
+            service_date = today
+        age = float(max(0, max_days_until - days_until))
         weight = math.exp(-age / half_life) if half_life > 0 else 1.0
         entries.append({
-            "service_date": s.get("service_date") or today,
+            "service_date": service_date,
             "bell": bell,
             "maru": maru,
             "tel": tel,
@@ -3696,6 +3706,7 @@ def _calc_bigdata_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: d
         "bd_total_weighted": weighted_total,
         "bd_total_sat": total_sat,
         "bd_half_life": half_life,
+        "bd_weight_basis": "days_until",
         "bd_prior_bell": prior_bell,
         "bd_prior_open": prior_open,
         "bd_days": n_service,
