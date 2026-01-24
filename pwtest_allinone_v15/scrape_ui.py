@@ -629,7 +629,7 @@ class App(tk.Tk):
             "qual": self._get_quality_label(),
             "lb": self._get_lower_label(),
             "delta": "Δpop",
-            "conf": "Conf",
+            "conf": "Health",
             "rate": "bell%",
             "bell": HEADER_LABELS["bell"],
             "maru": HEADER_LABELS["maru"],
@@ -647,7 +647,8 @@ class App(tk.Tk):
             f"BigData: 履歴で平滑化したScore / "
             f"{rank_label}: {rank_note} / "
             f"Quality: 長期の埋まり率 / "
-            f"Lower%: Qualityの下限"
+            f"Lower%: Qualityの下限 / "
+            f"Health: 取得/解析の健全性 (all_dashは異常扱いしない)"
         )
 
     def _refresh_score_help_text(self):
@@ -1785,20 +1786,28 @@ class App(tk.Tk):
             if isinstance(stats_by_date, dict):
                 r["stats_by_date"] = stats_by_date
 
-            # 信頼度（サイト側評価：キャスト評価に加えない）
-            diag = {
-                "iframe_ok": True,
-                "time_rows": r["stats"].get("time_rows", 0) or 0,
-                "max_cols": r["stats"].get("max_cols", 0) or 0,
-                "other_ratio": r["stats"].get("other_ratio", None),
-                "suspicious_hit": bool(r["stats"].get("suspicious_hit")),
-                "min_rows": 20,
-                "min_cols": 7,
-                "max_other_ratio": 0.35,
-            }
-            conf, issues = calc_site_confidence(diag)
+            # 健全性（取得/解析の成立度。キャスト評価には加えない）
+            diag = _row_quality_diag_from_stats(
+                r.get("stats", {}),
+                frame_url=r.get("frame_url"),
+                parse_errors=r.get("parse_errors") if isinstance(r.get("parse_errors"), list) else None,
+            )
+            conf, grade, reasons, core_missing = _calc_scrape_health(diag)
+            r["row_quality_score"] = conf
+            r["row_quality_grade"] = grade
+            r["row_quality_reasons"] = reasons
+            r["row_quality_core_missing"] = core_missing
+            r["scrape_health"] = conf
+            r["scrape_health_grade"] = grade
+            r["scrape_health_reasons"] = reasons
+            r["scrape_health_core_missing"] = core_missing
             r["site_confidence"] = conf
-            r["site_issues"] = issues
+            r["site_issues"] = reasons
+            r["scrape_issues"] = reasons
+
+            signal_strength, signal_detail = _calc_signal_strength(r.get("stats", {}), stats_by_date=stats_by_date)
+            r["signal_strength"] = signal_strength
+            r["signal_detail"] = signal_detail
 
             r["score"] = calc_score(r["stats"], max_bell)
             # ビッグデータ版（過去履歴を使って安定化したスコア）

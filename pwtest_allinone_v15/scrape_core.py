@@ -2646,7 +2646,7 @@ def _row_quality_diag_from_stats(stats: dict, frame_url: str = None, parse_error
         "all_dash": _looks_like_all_dash(stats),
     }
 
-def _calc_row_quality(diag: dict) -> tuple[int, str, list, bool]:
+def _calc_scrape_health(diag: dict) -> tuple[int, str, list, bool]:
     score = 100
     reasons = []
     core_missing = False
@@ -2672,10 +2672,6 @@ def _calc_row_quality(diag: dict) -> tuple[int, str, list, bool]:
         reasons.append("parse_errors")
         core_missing = True
 
-    if diag.get("all_dash"):
-        score -= _QUALITY_ALL_DASH_PENALTY
-        reasons.append("all_dash")
-
     if score < 0:
         score = 0
     if score > 100:
@@ -2689,11 +2685,17 @@ def _calc_row_quality(diag: dict) -> tuple[int, str, list, bool]:
         grade = "BAD"
     return score, grade, reasons, core_missing
 
+def _calc_row_quality(diag: dict) -> tuple[int, str, list, bool]:
+    """
+    互換用: row_quality = scrape_health と同義
+    """
+    return _calc_scrape_health(diag)
+
 def _should_dump_suspicious(stats: dict, detect: dict, frame_url: str = None) -> bool:
     if not detect or not detect.get("suspicious_hit"):
         return False
     diag = _row_quality_diag_from_stats(stats, frame_url=frame_url)
-    _, grade, _, core_missing = _calc_row_quality(diag)
+    _, grade, _, core_missing = _calc_scrape_health(diag)
     strength = detect.get("strength")
     if strength == "strong" and grade == "BAD":
         return True
@@ -2701,13 +2703,64 @@ def _should_dump_suspicious(stats: dict, detect: dict, frame_url: str = None) ->
         return True
     return False
 
+def calc_scrape_health(stats: dict, frame_url: str = None, parse_errors: list = None):
+    """
+    取得/解析の健全性（0〜100）
+    ※ 予約シグナル(all_dash等)とは分離
+    """
+    diag = _row_quality_diag_from_stats(stats, frame_url=frame_url, parse_errors=parse_errors)
+    score, _grade, reasons, _core_missing = _calc_scrape_health(diag)
+    return score, reasons
+
+def _calc_signal_strength(stats: dict, stats_by_date: dict = None):
+    """
+    需要/予約シグナルの強さ（0〜100）
+    - all_dashは異常ではなく、信号が弱い状態として扱う
+    """
+    stats = stats or {}
+    params = _get_score_params()
+    total_sat = float(params.get("bd_total_sat", 40) or 40)
+    day_sat = float(params.get("bd_day_sat", 14) or 14)
+    bell = int(stats.get("bell", 0) or 0)
+    maru = int(stats.get("maru", 0) or 0)
+    tel = int(stats.get("tel", 0) or 0)
+    total = bell + maru + tel
+    service_days = 0
+    if isinstance(stats_by_date, dict):
+        for st in stats_by_date.values():
+            if not isinstance(st, dict):
+                continue
+            day_total = int(st.get("bell", 0) or 0) + int(st.get("maru", 0) or 0) + int(st.get("tel", 0) or 0)
+            if day_total > 0:
+                service_days += 1
+    if service_days <= 0 and total > 0:
+        service_days = 1
+    total_factor = 1.0 - math.exp(-total / total_sat) if total_sat > 0 else 1.0
+    day_factor = 1.0 - math.exp(-service_days / day_sat) if day_sat > 0 else 1.0
+    strength = _clamp01(total_factor * day_factor) * 100.0
+    detail = {
+        "signal_total": total,
+        "signal_service_days": service_days,
+        "signal_total_sat": total_sat,
+        "signal_day_sat": day_sat,
+        "signal_total_factor": total_factor,
+        "signal_day_factor": day_factor,
+        "all_dash": _looks_like_all_dash(stats),
+    }
+    return strength, detail
+
 def calc_site_confidence(diag):
     """
-    サイト/取得の信頼度（0〜100）
-    ※ キャスト評価には加えない（別軸）
-    ルール：構造整合性を最重視した row_quality を返す。
+    互換: site_confidence = scrape_health
+    旧来のrow_quality互換も維持する。
     """
-    score, _grade, reasons, _core_missing = _calc_row_quality(diag or {})
+    if isinstance(diag, dict) and any(k in diag for k in ("has_calendar_table", "header_dates", "slots_total", "counts_sum")):
+        score, _grade, reasons, _core_missing = _calc_scrape_health(diag or {})
+        return score, reasons
+    if isinstance(diag, dict):
+        score, reasons = calc_scrape_health(diag)
+        return score, reasons
+    score, reasons = calc_scrape_health({})
     return score, reasons
 
 def _safe_name(s: str):
@@ -3905,6 +3958,8 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
     try:
         suspicious = 0
         confs = []
+        scrape_healths = []
+        signals = []
         scores = []
         bigs = []
         ranks = []
@@ -3917,6 +3972,10 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
             if st.get("suspicious_hit"):
                 suspicious += 1
             confs.append(int(r.get("site_confidence", 0) or 0))
+            scrape_healths.append(int(r.get("scrape_health", r.get("site_confidence", 0)) or 0))
+            sv = r.get("signal_strength")
+            if isinstance(sv, (int, float)):
+                signals.append(float(sv))
             scores.append(float(r.get("score", 0) or 0))
             bigs.append(float(r.get("big_score", r.get("score",0)) or 0))
             rank_raw = r.get("rank_score_raw")
@@ -3950,6 +4009,8 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
             "rows": len(rows),
             "suspicious_rows": suspicious,
             "avg_confidence": (sum(confs) / len(confs)) if confs else None,
+            "avg_scrape_health": (sum(scrape_healths) / len(scrape_healths)) if scrape_healths else None,
+            "avg_signal_strength": (sum(signals) / len(signals)) if signals else None,
             "avg_score": (sum(scores) / len(scores)) if scores else None,
             "avg_big_score": (sum(bigs) / len(bigs)) if bigs else None,
             "avg_rank_score_raw": (sum(ranks) / len(ranks)) if ranks else None,
@@ -3972,6 +4033,8 @@ def build_analytics(all_rows: list, run_ts: str, run_dir: str):
                     "momentum_score": r.get("momentum_score"),
                     "delta": r.get("delta"),
                     "conf": r.get("site_confidence"),
+                    "scrape_health": r.get("scrape_health", r.get("site_confidence")),
+                    "signal_strength": r.get("signal_strength"),
                     "bell": (r.get("stats",{}) or {}).get("bell"),
                     "maru": (r.get("stats",{}) or {}).get("maru"),
                     "tel": (r.get("stats",{}) or {}).get("tel"),
@@ -5584,7 +5647,7 @@ def _summarize_row_quality(rows: list) -> dict:
     for r in rows or []:
         grade = r.get("row_quality_grade")
         if grade not in counts:
-            conf = int(r.get("site_confidence", 0) or 0)
+            conf = int(r.get("scrape_health", r.get("site_confidence", 0)) or 0)
             if conf >= _QUALITY_OK_MIN:
                 grade = "OK"
             elif conf >= _QUALITY_WARN_MIN:
@@ -5836,14 +5899,23 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
             frame_url=r.get("frame_url"),
             parse_errors=r.get("parse_errors") if isinstance(r.get("parse_errors"), list) else None,
         )
-        conf, grade, reasons, core_missing = _calc_row_quality(diag)
+        conf, grade, reasons, core_missing = _calc_scrape_health(diag)
         r["row_quality_score"] = conf
         r["row_quality_grade"] = grade
         r["row_quality_reasons"] = reasons
         r["row_quality_core_missing"] = core_missing
+        r["scrape_health"] = conf
+        r["scrape_health_grade"] = grade
+        r["scrape_health_reasons"] = reasons
+        r["scrape_health_core_missing"] = core_missing
         r["site_confidence"] = conf
         r.setdefault("conf", r.get("site_confidence"))
         r["site_issues"] = reasons
+        r["scrape_issues"] = reasons
+
+        signal_strength, signal_detail = _calc_signal_strength(stats, stats_by_date=stats_by_date)
+        r["signal_strength"] = signal_strength
+        r["signal_detail"] = signal_detail
 
         r["score"] = calc_score(stats, max_bell)
         r["score_model"] = _SCORE_MODEL_NAME
@@ -5921,6 +5993,8 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "rank_detail": r.get("rank_detail"),
                     "spike": r.get("spike"),
                     "site_confidence": r.get("site_confidence", 0),
+                    "scrape_health": r.get("scrape_health", r.get("site_confidence", 0)),
+                    "signal_strength": r.get("signal_strength"),
                     "stats": stats,
                     "stats_by_date": stats_by_date,
                 })
@@ -5948,6 +6022,8 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
                     "rank_percentile": r.get("rank_percentile"),
                     "rank_percentile_lower": r.get("rank_percentile_lower"),
                     "rank_model_version": r.get("rank_model_version"),
+                    "scrape_health": r.get("scrape_health", r.get("site_confidence", 0)),
+                    "signal_strength": r.get("signal_strength"),
                 })
             except Exception as e:
                 log_event("ERR", "save_state_snapshot failed", preset=job.name, gid=gid, err=str(e)[:200])
