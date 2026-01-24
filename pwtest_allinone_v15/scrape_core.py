@@ -2685,6 +2685,20 @@ def _calc_scrape_health(diag: dict) -> tuple[int, str, list, bool]:
         grade = "BAD"
     return score, grade, reasons, core_missing
 
+def _apply_scrape_health_fields(row: dict, score: int, grade: str, reasons: list, core_missing: bool) -> None:
+    if not isinstance(row, dict):
+        return
+    row["row_quality_score"] = score
+    row["row_quality_grade"] = grade
+    row["row_quality_reasons"] = reasons
+    row["row_quality_core_missing"] = core_missing
+    row["scrape_health"] = score
+    row["scrape_health_grade"] = grade
+    row["scrape_health_reasons"] = reasons
+    row["scrape_health_core_missing"] = core_missing
+    row["site_confidence"] = score
+    row.setdefault("conf", row.get("site_confidence"))
+
 def _calc_row_quality(diag: dict) -> tuple[int, str, list, bool]:
     """
     互換用: row_quality = scrape_health と同義
@@ -3449,13 +3463,16 @@ def append_history(gid: str, rec: dict):
 def _percentile_of(value: float, arr):
     if not arr:
         return None
-    s = sorted(arr)
-    # value以下の割合（0..1）
-    lo = 0
-    for x in s:
-        if x <= value:
-            lo += 1
-    return lo / max(1, len(s))
+    unique = sorted(set(arr))
+    if not unique:
+        return None
+    if len(unique) == 1:
+        return 0.0
+    denom = len(unique) - 1
+    for i, v in enumerate(unique):
+        if v == value:
+            return i / denom
+    return None
 
 def _collect_service_date_series(cur_stats: dict, hist: list, cur_stats_by_date: dict, min_conf: int, include_zero: bool=False):
     def _parse_iso_date(val):
@@ -3889,6 +3906,8 @@ def _calc_rank_score_detail(cur_stats: dict, hist: list, cur_stats_by_date: dict
     rank_raw = _clamp01(rank_raw)
     rank_lower = (quality_lower ** quality_power) * (rank_momentum_base + (1.0 - rank_momentum_base) * (momentum ** momentum_power))
     rank_lower = _clamp01(rank_lower)
+    if rank_lower > rank_raw:
+        rank_lower = rank_raw
 
     detail = {
         "rank_model_version": _RANK_MODEL_NAME,
@@ -5900,16 +5919,7 @@ def finalize_rows(collected_rows: list, prev_rows: list, run_dir: str, job, job_
             parse_errors=r.get("parse_errors") if isinstance(r.get("parse_errors"), list) else None,
         )
         conf, grade, reasons, core_missing = _calc_scrape_health(diag)
-        r["row_quality_score"] = conf
-        r["row_quality_grade"] = grade
-        r["row_quality_reasons"] = reasons
-        r["row_quality_core_missing"] = core_missing
-        r["scrape_health"] = conf
-        r["scrape_health_grade"] = grade
-        r["scrape_health_reasons"] = reasons
-        r["scrape_health_core_missing"] = core_missing
-        r["site_confidence"] = conf
-        r.setdefault("conf", r.get("site_confidence"))
+        _apply_scrape_health_fields(r, conf, grade, reasons, core_missing)
         r["site_issues"] = reasons
         r["scrape_issues"] = reasons
 
