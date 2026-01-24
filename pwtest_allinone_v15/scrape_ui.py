@@ -645,7 +645,7 @@ class App(tk.Tk):
         return (
             f"Score: 当日スコア / "
             f"BigData: 履歴で平滑化したScore / "
-            f"{rank_label}: {rank_note}（上位%・同率は最小順位） / "
+            f"{rank_label}: {rank_note} / "
             f"Quality: 長期の埋まり率 / "
             f"Lower%: Qualityの下限 / "
             f"Health: 取得/解析の健全性 (all_dashは異常扱いしない)"
@@ -1792,7 +1792,18 @@ class App(tk.Tk):
                 frame_url=r.get("frame_url"),
                 parse_errors=r.get("parse_errors") if isinstance(r.get("parse_errors"), list) else None,
             )
-            _apply_scrape_health_fields(r, diag, set_conf_alias=True)
+            conf, grade, reasons, core_missing = _calc_scrape_health(diag)
+            r["row_quality_score"] = conf
+            r["row_quality_grade"] = grade
+            r["row_quality_reasons"] = reasons
+            r["row_quality_core_missing"] = core_missing
+            r["scrape_health"] = conf
+            r["scrape_health_grade"] = grade
+            r["scrape_health_reasons"] = reasons
+            r["scrape_health_core_missing"] = core_missing
+            r["site_confidence"] = conf
+            r["site_issues"] = reasons
+            r["scrape_issues"] = reasons
 
             signal_strength, signal_detail = _calc_signal_strength(r.get("stats", {}), stats_by_date=stats_by_date)
             r["signal_strength"] = signal_strength
