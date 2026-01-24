@@ -8,7 +8,7 @@ import sys
 
 # Core logic (Playwright, scoring, IO, presets, auto runner...)
 from scrape_core import *  # noqa: F401,F403
-from scrape_core import _now_ts, _safe_name, _detail_log_enabled  # '_' names are not imported by '*'
+from scrape_core import _apply_scrape_health_fields, _detail_log_enabled, _now_ts, _safe_name  # '_' names are not imported by '*'
 
 HEADER_LABELS = {
     "bell": "🔔",
