@@ -15,6 +15,24 @@ HEADER_LABELS = {
     "maru": "○",
     "tel": "📞",
 }
+DISPLAY_LABELS = {
+    "rank": "Rank",
+    "name": "Name",
+    "gid": "GID",
+    "score": "Score",
+    "big_score": "BigData",
+    "rank_percentile": "Rank%",
+    "quality_score": "Quality",
+    "quality_lower_bound": "Lower%",
+    "conf": "Health",
+    "bell_rate": "bell%",
+    "bell": HEADER_LABELS["bell"],
+    "maru": HEADER_LABELS["maru"],
+    "tel": HEADER_LABELS["tel"],
+    "bookable": "Bookable",
+    "total": "Total",
+    "delta": "Δpop",
+}
 
 
 class CastDetailPanel(ttk.Frame):
@@ -266,20 +284,20 @@ class CastDetailPanel(ttk.Frame):
         if show_delta:
             extra_cols += [k for k in self.delta_keys if self._col_present(k)]
         col_defs = [
-            ("rank", "Rank", 60),
-            ("name", "Name", 200),
-            ("gid", "GID", 110),
-            ("score", "Score", 80),
+            ("rank", DISPLAY_LABELS["rank"], 60),
+            ("name", DISPLAY_LABELS["name"], 200),
+            ("gid", DISPLAY_LABELS["gid"], 110),
+            ("score", DISPLAY_LABELS["score"], 80),
             ("big_score", self.app._get_bigdata_label(), 80),
             ("rank_percentile", self.app._get_rank_column_label(), 80),
             ("quality_score", self.app._get_quality_label(), 70),
             ("quality_lower_bound", self.app._get_lower_label(), 70),
-            ("conf", "Conf", 70),
-            ("bell", HEADER_LABELS["bell"], 60),
-            ("maru", HEADER_LABELS["maru"], 60),
-            ("tel", HEADER_LABELS["tel"], 60),
-            ("bookable", "Bookable", 80),
-            ("total", "Total", 70),
+            ("conf", DISPLAY_LABELS["conf"], 70),
+            ("bell", DISPLAY_LABELS["bell"], 60),
+            ("maru", DISPLAY_LABELS["maru"], 60),
+            ("tel", DISPLAY_LABELS["tel"], 60),
+            ("bookable", DISPLAY_LABELS["bookable"], 80),
+            ("total", DISPLAY_LABELS["total"], 70),
         ]
         col_defs += [(k, k, 120) for k in extra_cols]
         return col_defs
@@ -599,10 +617,7 @@ class App(tk.Tk):
         return "lower" if sort_mode == "lower" else "raw"
 
     def _get_rank_labels(self):
-        if self._get_rank_sort_mode() == "lower":
-            label = "Rank%（下限）"
-        else:
-            label = "Rank%（品質×勢い）"
+        label = DISPLAY_LABELS["rank_percentile"]
         return {"sort": label, "column": label}
 
     def _get_rank_sort_label(self):
@@ -612,31 +627,31 @@ class App(tk.Tk):
         return self._get_rank_labels()["column"]
 
     def _get_bigdata_label(self):
-        return "BigData"
+        return DISPLAY_LABELS["big_score"]
 
     def _get_quality_label(self):
-        return "Quality"
+        return DISPLAY_LABELS["quality_score"]
 
     def _get_lower_label(self):
-        return "Lower%"
+        return DISPLAY_LABELS["quality_lower_bound"]
 
     def _get_main_tree_headings(self):
         return {
-            "rank": "Rank",
-            "score": "Score",
+            "rank": DISPLAY_LABELS["rank"],
+            "score": DISPLAY_LABELS["score"],
             "big": self._get_bigdata_label(),
             "rnk": self._get_rank_column_label(),
             "qual": self._get_quality_label(),
             "lb": self._get_lower_label(),
-            "delta": "Δpop",
-            "conf": "Health",
-            "rate": "bell%",
-            "bell": HEADER_LABELS["bell"],
-            "maru": HEADER_LABELS["maru"],
-            "tel": HEADER_LABELS["tel"],
-            "bookable": "Bookable",
-            "total": "Total",
-            "name": "Name",
+            "delta": DISPLAY_LABELS["delta"],
+            "conf": DISPLAY_LABELS["conf"],
+            "rate": DISPLAY_LABELS["bell_rate"],
+            "bell": DISPLAY_LABELS["bell"],
+            "maru": DISPLAY_LABELS["maru"],
+            "tel": DISPLAY_LABELS["tel"],
+            "bookable": DISPLAY_LABELS["bookable"],
+            "total": DISPLAY_LABELS["total"],
+            "name": DISPLAY_LABELS["name"],
         }
 
     def _get_score_help_text(self):
@@ -657,25 +672,39 @@ class App(tk.Tk):
 
     def _get_sort_options(self):
         return [
-            "総合スコア",
+            DISPLAY_LABELS["score"],
             self._get_rank_sort_label(),
-            "ビッグデータ",
-            "bell率",
-            "ベル数",
-            "空き(○)",
-            "TEL多い",
-            "bookable多い",
+            DISPLAY_LABELS["big_score"],
+            DISPLAY_LABELS["bell_rate"],
+            DISPLAY_LABELS["bell"],
+            DISPLAY_LABELS["maru"],
+            DISPLAY_LABELS["tel"],
+            DISPLAY_LABELS["bookable"],
         ]
 
     def _normalize_sort_label(self, label):
         rank_label = self._get_rank_sort_label()
-        legacy_labels = {"ランキング(新)", "Rank%（品質×勢い）", "Rank%（下限）"}
-        if label in legacy_labels:
-            return rank_label
-        return label
+        legacy_map = {
+            "ランキング(新)": rank_label,
+            "Rank%（品質×勢い）": rank_label,
+            "Rank%（下限）": rank_label,
+            "総合スコア": DISPLAY_LABELS["score"],
+            "ビッグデータ": DISPLAY_LABELS["big_score"],
+            "bell率": DISPLAY_LABELS["bell_rate"],
+            "ベル数": DISPLAY_LABELS["bell"],
+            "空き(○)": DISPLAY_LABELS["maru"],
+            "TEL多い": DISPLAY_LABELS["tel"],
+            "bookable多い": DISPLAY_LABELS["bookable"],
+        }
+        return legacy_map.get(label, label)
 
     def _is_rank_sort_label(self, label):
-        return label == self._get_rank_sort_label() or label == "ランキング(新)"
+        return label in {
+            self._get_rank_sort_label(),
+            "ランキング(新)",
+            "Rank%（品質×勢い）",
+            "Rank%（下限）",
+        }
 
     def _refresh_rank_labels(self):
         if not getattr(self, "combo_sort", None):
@@ -781,7 +810,7 @@ class App(tk.Tk):
         self.combo_sort = ttk.Combobox(top, width=16, state="readonly",
                                        values=self._get_sort_options())
         self.combo_sort.grid(row=2, column=6, sticky="w", padx=6, pady=(10,0))
-        self.combo_sort.set("総合スコア")
+        self.combo_sort.set(self._get_rank_sort_label())
         self.combo_sort.bind("<<ComboboxSelected>>", lambda e: self.resort_view())
 
         mid = ttk.Panedwindow(self, orient="horizontal")
@@ -1923,17 +1952,17 @@ class App(tk.Tk):
                 key=_rank_key,
                 reverse=True,
             )
-        elif keyname == "ビッグデータ":
+        elif keyname == DISPLAY_LABELS["big_score"]:
             rows.sort(key=lambda r: (r.get("big_score") if r.get("big_score") is not None else r.get("score",0)), reverse=True)
-        elif keyname == "bell率":
+        elif keyname == DISPLAY_LABELS["bell_rate"]:
             rows.sort(key=lambda r: (r["stats"].get("bell_rate_bookable") is not None, r["stats"].get("bell_rate_bookable") or 0), reverse=True)
-        elif keyname == "ベル数":
+        elif keyname == DISPLAY_LABELS["bell"]:
             rows.sort(key=lambda r: (r["stats"].get("bell",0) or 0), reverse=True)
-        elif keyname == "空き(○)":
+        elif keyname == DISPLAY_LABELS["maru"]:
             rows.sort(key=lambda r: (r["stats"].get("maru",0) or 0), reverse=True)
-        elif keyname == "TEL多い":
+        elif keyname == DISPLAY_LABELS["tel"]:
             rows.sort(key=lambda r: (r["stats"].get("tel",0) or 0), reverse=True)
-        elif keyname == "bookable多い":
+        elif keyname == DISPLAY_LABELS["bookable"]:
             rows.sort(key=lambda r: (r["stats"].get("bookable_slots",0) or 0), reverse=True)
         else:
             rows.sort(key=lambda r: r.get("score",0), reverse=True)
